@@ -1,0 +1,836 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ============================================================
+// CONFIG — Change these per QBank deployment
+// ============================================================
+const CONFIG = {
+  SUPABASE_URL: "https://mjomlxbafjfmjniltluh.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_t6YuUYq4TYn3q0DfAXNF_Q_N1LmeaU3",
+  CERTIFICATION_ID: "chc",
+  BRAND: {
+    name: "CHC QBank",
+    tagline: "Certified in Healthcare Compliance — Exam Prep",
+    icon: "🛡️",
+    accent: "#0F766E",
+    accentLight: "#14B8A6",
+    accentDim: "#0F766E15",
+  },
+  STRIPE_LINKS: {
+    monthly:   "https://buy.stripe.com/fZu28r20y7dbdpjdGa4ZG07",
+    quarterly: "https://buy.stripe.com/fZucN57kS7db70V8lQ4ZG08",
+    annual:    "https://buy.stripe.com/bJe4gzgVs8hf0CxcC64ZG09",
+  },
+  FREE_QUESTION_LIMIT: 50,
+};
+
+// ============================================================
+// MINIMAL SUPABASE CLIENT (no npm dependency needed)
+// ============================================================
+class SupabaseClient {
+  constructor(url, key) {
+    this.url = url;
+    this.key = key;
+    this.accessToken = null;
+    this.refreshToken = null;
+    this.user = null;
+    this._listeners = [];
+    this._loadSession();
+  }
+
+  _headers(useServiceRole = false) {
+    const h = { "Content-Type": "application/json", apikey: this.key };
+    if (this.accessToken) h["Authorization"] = `Bearer ${this.accessToken}`;
+    else h["Authorization"] = `Bearer ${this.key}`;
+    return h;
+  }
+
+  _saveSession() {
+    if (this.accessToken) {
+      localStorage.setItem("sb_session", JSON.stringify({
+        access_token: this.accessToken, refresh_token: this.refreshToken, user: this.user
+      }));
+    } else {
+      localStorage.removeItem("sb_session");
+    }
+  }
+
+  _loadSession() {
+    try {
+      const s = JSON.parse(localStorage.getItem("sb_session"));
+      if (s?.access_token) {
+        this.accessToken = s.access_token;
+        this.refreshToken = s.refresh_token;
+        this.user = s.user;
+      }
+    } catch {}
+  }
+
+  _notify() { this._listeners.forEach(fn => fn(this.user)); }
+  onAuthStateChange(fn) { this._listeners.push(fn); return () => { this._listeners = this._listeners.filter(f => f !== fn); }; }
+
+  async signUp(email, password, fullName) {
+    const res = await fetch(`${this.url}/auth/v1/signup`, {
+      method: "POST", headers: { "Content-Type": "application/json", apikey: this.key },
+      body: JSON.stringify({ email, password, data: { full_name: fullName } }),
+    });
+    const data = await res.json();
+    if (data.error || data.msg) throw new Error(data.error?.message || data.msg || "Signup failed");
+    if (data.access_token) {
+      this.accessToken = data.access_token;
+      this.refreshToken = data.refresh_token;
+      this.user = data.user;
+      this._saveSession();
+      this._notify();
+    }
+    return data;
+  }
+
+  async signIn(email, password) {
+    const res = await fetch(`${this.url}/auth/v1/token?grant_type=password`, {
+      method: "POST", headers: { "Content-Type": "application/json", apikey: this.key },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (data.error || data.error_description) throw new Error(data.error_description || data.error || "Login failed");
+    this.accessToken = data.access_token;
+    this.refreshToken = data.refresh_token;
+    this.user = data.user;
+    this._saveSession();
+    this._notify();
+    return data;
+  }
+
+  async signOut() {
+    try { await fetch(`${this.url}/auth/v1/logout`, { method: "POST", headers: this._headers() }); } catch {}
+    this.accessToken = null; this.refreshToken = null; this.user = null;
+    this._saveSession(); this._notify();
+  }
+
+  async refreshSession() {
+    if (!this.refreshToken) return null;
+    try {
+      const res = await fetch(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
+        method: "POST", headers: { "Content-Type": "application/json", apikey: this.key },
+        body: JSON.stringify({ refresh_token: this.refreshToken }),
+      });
+      const data = await res.json();
+      if (data.access_token) {
+        this.accessToken = data.access_token;
+        this.refreshToken = data.refresh_token;
+        this.user = data.user;
+        this._saveSession();
+      }
+      return data;
+    } catch { return null; }
+  }
+
+  getUser() { return this.user; }
+
+  // REST API for database operations
+  async query(table, { select = "*", filters = [], single = false, upsert = false, body = null, method = "GET" } = {}) {
+    let url = `${this.url}/rest/v1/${table}?select=${select}`;
+    filters.forEach(f => { url += `&${f}`; });
+    const opts = { method, headers: { ...this._headers(), Prefer: upsert ? "resolution=merge-duplicates,return=representation" : (method === "POST" ? "return=representation" : "return=representation") } };
+    if (body) opts.body = JSON.stringify(body);
+    if (upsert) opts.headers["Prefer"] = "resolution=merge-duplicates,return=representation";
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (single && Array.isArray(data)) return data[0] || null;
+    return data;
+  }
+
+  async from(table) {
+    return {
+      select: async (sel = "*", filters = []) => this.query(table, { select: sel, filters }),
+      insert: async (body) => this.query(table, { method: "POST", body }),
+      upsert: async (body) => this.query(table, { method: "POST", body, upsert: true }),
+    };
+  }
+
+  // Convenience methods
+  async getSubscription(certId) {
+    const user = this.getUser();
+    if (!user) return null;
+    return this.query("user_subscriptions", {
+      filters: [`user_id=eq.${user.id}`, `certification_id=eq.${certId}`, `status=eq.active`],
+      single: true,
+    });
+  }
+
+  async createFreeTrial(certId) {
+    const user = this.getUser();
+    if (!user) return;
+    return this.query("user_subscriptions", {
+      method: "POST", upsert: true,
+      body: { user_id: user.id, certification_id: certId, plan: "free_trial", status: "active",
+        trial_ends_at: new Date(Date.now() + 7 * 86400000).toISOString() },
+    });
+  }
+
+  async getQuestions(certId, { limit = 50, filters = [] } = {}) {
+    return this.query("questions", {
+      filters: [`certification_id=eq.${certId}`, `is_active=eq.true`, ...filters, `limit=${limit}`],
+    });
+  }
+
+  async getDomains(certId) {
+    return this.query("exam_domains", {
+      filters: [`certification_id=eq.${certId}`, `order=sort_order.asc`],
+    });
+  }
+
+  async saveProgress(progress) {
+    return this.query("user_question_progress", { method: "POST", body: progress });
+  }
+}
+
+const supabase = new SupabaseClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+
+// ============================================================
+// MAIN APP
+// ============================================================
+export default function QBankApp() {
+  const [user, setUser] = useState(supabase.getUser());
+  const [screen, setScreen] = useState(user ? "loading" : "auth");
+  const [authMode, setAuthMode] = useState("login");
+  const [subscription, setSubscription] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [domains, setDomains] = useState([]);
+  const [quizConfig, setQuizConfig] = useState(null);
+  const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); };
+
+  // Check auth state on mount
+  useEffect(() => {
+    if (user) loadUserData();
+    const unsub = supabase.onAuthStateChange((u) => {
+      setUser(u);
+      if (u) loadUserData();
+      else setScreen("auth");
+    });
+    return unsub;
+  }, []);
+
+  // Refresh session on mount
+  useEffect(() => {
+    if (supabase.refreshToken) {
+      supabase.refreshSession().then(() => {
+        setUser(supabase.getUser());
+      });
+    }
+  }, []);
+
+  // Check URL for upgrade success
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("upgrade") === "success") {
+      showToast("Payment received! Your account has been upgraded.");
+      window.history.replaceState({}, "", window.location.pathname);
+      // Re-check subscription after a moment (webhook may take a second)
+      setTimeout(() => loadUserData(), 2000);
+    }
+  }, []);
+
+  async function loadUserData() {
+    setScreen("loading");
+    try {
+      // Get subscription
+      const sub = await supabase.getSubscription(CONFIG.CERTIFICATION_ID);
+      if (!sub) {
+        // Create free trial automatically
+        await supabase.createFreeTrial(CONFIG.CERTIFICATION_ID);
+        const newSub = await supabase.getSubscription(CONFIG.CERTIFICATION_ID);
+        setSubscription(newSub);
+      } else {
+        setSubscription(sub);
+      }
+      // Get domains
+      const d = await supabase.getDomains(CONFIG.CERTIFICATION_ID);
+      setDomains(Array.isArray(d) ? d : []);
+      // Get questions
+      const q = await supabase.getQuestions(CONFIG.CERTIFICATION_ID, { limit: 500 });
+      setQuestions(Array.isArray(q) ? q : []);
+      setScreen("dashboard");
+    } catch (err) {
+      console.error("Load error:", err);
+      setScreen("dashboard");
+    }
+  }
+
+  function getAccessLevel() {
+    if (!subscription) return "none";
+    const now = new Date();
+    if (subscription.plan === "free_trial") {
+      if (new Date(subscription.trial_ends_at) > now) return "trial";
+      return "expired";
+    }
+    if (["monthly", "quarterly", "annual"].includes(subscription.plan)) {
+      if (!subscription.expires_at || new Date(subscription.expires_at) > now) return "full";
+      return "expired";
+    }
+    return "none";
+  }
+
+  const access = getAccessLevel();
+  const availableQuestions = access === "full"
+    ? questions
+    : questions.filter(q => q.is_free).slice(0, CONFIG.FREE_QUESTION_LIMIT);
+
+  const B = CONFIG.BRAND;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#F8FAFB", fontFamily: "'DM Sans', 'Nunito Sans', system-ui, sans-serif", color: "#1a2332" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Nunito+Sans:ital,opsz,wght@0,6..12,200..1000;1,6..12,200..1000&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::selection { background: ${B.accent}30; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+        input, button, textarea { font-family: inherit; }
+        button { cursor: pointer; border: none; }
+        input { outline: none; }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .fade-up { animation: fadeUp 0.4s ease-out forwards; opacity: 0; }
+      `}</style>
+
+      {toast && (
+        <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, padding: "14px 22px", borderRadius: 12,
+          background: toast.type === "success" ? B.accent : "#DC2626", color: "white", fontSize: 14, fontWeight: 600,
+          boxShadow: "0 8px 30px rgba(0,0,0,0.15)", animation: "fadeUp 0.3s ease" }}>{toast.msg}</div>
+      )}
+
+      {screen === "auth" && (
+        <AuthScreen mode={authMode} setMode={setAuthMode} brand={B}
+          onAuth={async (email, pass, name) => {
+            try {
+              setError(null);
+              if (authMode === "signup") await supabase.signUp(email, pass, name);
+              else await supabase.signIn(email, pass);
+              setUser(supabase.getUser());
+              showToast(authMode === "signup" ? "Account created! Welcome to " + B.name : "Welcome back!");
+            } catch (err) { setError(err.message); }
+          }}
+          error={error}
+        />
+      )}
+
+      {screen === "loading" && (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
+          <div style={{ width: 40, height: 40, border: `3px solid #eee`, borderTopColor: B.accent, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+          <span style={{ color: "#8896a6", fontSize: 14 }}>Loading your QBank...</span>
+        </div>
+      )}
+
+      {screen === "dashboard" && (
+        <DashboardScreen user={user} brand={B} access={access} subscription={subscription}
+          questions={questions} availableQuestions={availableQuestions} domains={domains}
+          onStartQuiz={(config) => { setQuizConfig(config); setScreen("quiz"); }}
+          onNavigate={setScreen}
+          onLogout={() => { supabase.signOut(); setUser(null); setScreen("auth"); }}
+          showToast={showToast}
+        />
+      )}
+
+      {screen === "quiz" && quizConfig && (
+        <QuizScreen config={quizConfig} brand={B} access={access}
+          onSaveProgress={(p) => { try { supabase.saveProgress(p); } catch {} }}
+          onExit={() => { loadUserData(); setScreen("dashboard"); }}
+          showToast={showToast}
+        />
+      )}
+
+      {screen === "upgrade" && (
+        <UpgradeScreen brand={B} access={access} subscription={subscription}
+          onBack={() => setScreen("dashboard")} />
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// AUTH SCREEN
+// ============================================================
+function AuthScreen({ mode, setMode, brand, onAuth, error }) {
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [name, setName] = useState("");
+  const B = brand;
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+      background: `linear-gradient(135deg, ${B.accent}08 0%, #F8FAFB 50%, ${B.accent}05 100%)` }}>
+      <div className="fade-up" style={{ width: "100%", maxWidth: 420, background: "white", borderRadius: 20, padding: "40px 36px",
+        boxShadow: "0 4px 24px rgba(0,0,0,0.06)", border: "1px solid #eef1f4" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 32 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: B.accent, display: "flex", alignItems: "center",
+            justifyContent: "center", fontSize: 22 }}>{B.icon}</div>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>{B.name}</div>
+            <div style={{ fontSize: 12, color: "#8896a6" }}>{B.tagline}</div>
+          </div>
+        </div>
+
+        <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{mode === "login" ? "Welcome back" : "Create your account"}</h2>
+        <p style={{ fontSize: 14, color: "#8896a6", marginBottom: 28 }}>
+          {mode === "login" ? "Log in to continue studying" : "Start your 7-day free trial — no credit card needed"}
+        </p>
+
+        {error && (
+          <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10,
+            fontSize: 13, color: "#DC2626", marginBottom: 16 }}>{error}</div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {mode === "signup" && (
+            <div>
+              <label style={{ fontSize: 13, fontWeight: 600, color: "#5a6a7a", display: "block", marginBottom: 6 }}>Full Name</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="Jane Doe"
+                style={{ width: "100%", padding: "12px 16px", border: "1px solid #e2e7ed", borderRadius: 10, fontSize: 14, background: "#FAFBFC" }} />
+            </div>
+          )}
+          <div>
+            <label style={{ fontSize: 13, fontWeight: 600, color: "#5a6a7a", display: "block", marginBottom: 6 }}>Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com"
+              style={{ width: "100%", padding: "12px 16px", border: "1px solid #e2e7ed", borderRadius: 10, fontSize: 14, background: "#FAFBFC" }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 13, fontWeight: 600, color: "#5a6a7a", display: "block", marginBottom: 6 }}>Password</label>
+            <input type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="8+ characters"
+              onKeyDown={e => { if (e.key === "Enter") onAuth(email, pass, name); }}
+              style={{ width: "100%", padding: "12px 16px", border: "1px solid #e2e7ed", borderRadius: 10, fontSize: 14, background: "#FAFBFC" }} />
+          </div>
+          <button onClick={() => onAuth(email, pass, name)}
+            style={{ width: "100%", padding: "14px", background: B.accent, color: "white", borderRadius: 12,
+              fontSize: 15, fontWeight: 700, marginTop: 4, transition: "opacity 0.2s" }}
+            onMouseEnter={e => e.currentTarget.style.opacity = "0.9"}
+            onMouseLeave={e => e.currentTarget.style.opacity = "1"}>
+            {mode === "login" ? "Log In" : "Start Free Trial →"}
+          </button>
+        </div>
+
+        <p style={{ fontSize: 13, color: "#8896a6", textAlign: "center", marginTop: 20 }}>
+          {mode === "login" ? "Don't have an account? " : "Already have an account? "}
+          <span style={{ color: B.accent, fontWeight: 600, cursor: "pointer" }}
+            onClick={() => setMode(mode === "login" ? "signup" : "login")}>
+            {mode === "login" ? "Sign up free" : "Log in"}
+          </span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+function DashboardScreen({ user, brand, access, subscription, questions, availableQuestions, domains, onStartQuiz, onNavigate, onLogout, showToast }) {
+  const B = brand;
+  const totalQ = questions.length;
+  const freeQ = availableQuestions.length;
+  const daysLeft = subscription?.plan === "free_trial"
+    ? Math.max(0, Math.ceil((new Date(subscription.trial_ends_at) - Date.now()) / 86400000))
+    : null;
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      {/* Nav */}
+      <div style={{ background: "white", borderBottom: "1px solid #eef1f4", padding: "0 24px" }}>
+        <div style={{ maxWidth: 960, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", height: 60 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 22 }}>{B.icon}</span>
+            <span style={{ fontWeight: 800, fontSize: 17, letterSpacing: "-0.02em" }}>{B.name}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {access !== "full" && (
+              <button onClick={() => onNavigate("upgrade")}
+                style={{ padding: "8px 18px", background: B.accent, color: "white", borderRadius: 8, fontSize: 13, fontWeight: 700 }}>
+                Upgrade
+              </button>
+            )}
+            <div style={{ width: 34, height: 34, borderRadius: "50%", background: B.accent, display: "flex",
+              alignItems: "center", justifyContent: "center", color: "white", fontWeight: 700, fontSize: 14 }}>
+              {(user?.user_metadata?.full_name || user?.email || "U")[0].toUpperCase()}
+            </div>
+            <button onClick={onLogout} style={{ background: "none", fontSize: 13, color: "#8896a6", fontWeight: 500 }}>Log out</button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: "28px 24px" }}>
+        {/* Trial / Access Banner */}
+        {access === "trial" && daysLeft !== null && (
+          <div className="fade-up" style={{ background: `linear-gradient(135deg, ${B.accent}12, ${B.accent}06)`,
+            border: `1px solid ${B.accent}25`, borderRadius: 14, padding: "16px 22px",
+            display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+            <div>
+              <span style={{ fontSize: 14, fontWeight: 600, color: B.accent }}>Free Trial — {daysLeft} days remaining</span>
+              <span style={{ fontSize: 13, color: "#8896a6", marginLeft: 12 }}>
+                {freeQ} of {totalQ} questions available
+              </span>
+            </div>
+            <button onClick={() => onNavigate("upgrade")}
+              style={{ padding: "8px 20px", background: B.accent, color: "white", borderRadius: 8, fontSize: 13, fontWeight: 700 }}>
+              Unlock All {totalQ} Questions →
+            </button>
+          </div>
+        )}
+
+        {access === "expired" && (
+          <div className="fade-up" style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 14, padding: "16px 22px",
+            display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: "#DC2626" }}>
+              Your {subscription?.plan === "free_trial" ? "free trial" : "subscription"} has expired
+            </span>
+            <button onClick={() => onNavigate("upgrade")}
+              style={{ padding: "8px 20px", background: "#DC2626", color: "white", borderRadius: 8, fontSize: 13, fontWeight: 700 }}>
+              Upgrade Now
+            </button>
+          </div>
+        )}
+
+        {access === "full" && (
+          <div className="fade-up" style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 14, padding: "14px 22px",
+            marginBottom: 24, display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: "#166534" }}>✓ Full Access — {totalQ} questions available</span>
+            {subscription?.expires_at && (
+              <span style={{ fontSize: 13, color: "#15803D" }}>
+                · Expires {new Date(subscription.expires_at).toLocaleDateString()}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Welcome */}
+        <div className="fade-up" style={{ marginBottom: 28 }}>
+          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 4 }}>
+            Welcome{user?.user_metadata?.full_name ? `, ${user.user_metadata.full_name.split(" ")[0]}` : ""}
+          </h1>
+          <p style={{ fontSize: 14, color: "#8896a6" }}>Choose a study mode to begin your session.</p>
+        </div>
+
+        {/* Study Modes */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14, marginBottom: 36 }}>
+          {[
+            { mode: "tutor", icon: "📖", title: "Tutor Mode", desc: "See explanations after each question — best for learning.", tag: "Recommended" },
+            { mode: "timed", icon: "⏱️", title: "Timed Exam", desc: "Simulate real exam conditions — 1.2 min per question.", tag: "Exam Prep" },
+            { mode: "adaptive", icon: "🧠", title: "Adaptive Review", desc: "AI focuses on your weak areas and gaps.", tag: "Smart" },
+          ].map(m => (
+            <button key={m.mode} onClick={() => {
+              if (availableQuestions.length === 0) { showToast("No questions available yet", "error"); return; }
+              onStartQuiz({ mode: m.mode, questions: availableQuestions });
+            }}
+              style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 16, padding: "22px 20px",
+                textAlign: "left", transition: "all 0.15s ease" }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = B.accent; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(0,0,0,0.06)"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = "#eef1f4"; e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "none"; }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <span style={{ fontSize: 26 }}>{m.icon}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 6,
+                  background: B.accentDim, color: B.accent }}>{m.tag}</span>
+              </div>
+              <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{m.title}</div>
+              <div style={{ fontSize: 13, color: "#8896a6", lineHeight: 1.5 }}>{m.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Domain Progress */}
+        {domains.length > 0 && (
+          <div style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 16, padding: 24 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Exam Domains</h3>
+            {domains.map((d, i) => {
+              const domainQs = questions.filter(q => q.domain_id === d.id).length;
+              return (
+                <div key={d.id} style={{ padding: "12px 0", borderBottom: i < domains.length - 1 ? "1px solid #f3f5f7" : "none",
+                  display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <span style={{ fontSize: 14, fontWeight: 500 }}>{d.name}</span>
+                    <span style={{ fontSize: 12, color: "#8896a6", marginLeft: 8 }}>{domainQs} questions</span>
+                  </div>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: B.accent }}>{d.weight_percent}%</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Empty state */}
+        {questions.length === 0 && (
+          <div style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 16, padding: 48, textAlign: "center" }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>📝</div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>No questions yet</div>
+            <div style={{ fontSize: 14, color: "#8896a6" }}>Questions are being added to this QBank. Check back soon!</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// QUIZ SCREEN
+// ============================================================
+function QuizScreen({ config, brand, access, onSaveProgress, onExit, showToast }) {
+  const B = brand;
+  const qs = config.questions;
+  const [ci, setCi] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [answers, setAnswers] = useState({});
+  const [flagged, setFlagged] = useState(new Set());
+  const [elapsed, setElapsed] = useState(0);
+  const q = qs[ci];
+
+  useEffect(() => {
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const a = answers[q?.id];
+    if (a) { setSelected(a.selected); setSubmitted(true); }
+    else { setSelected(null); setSubmitted(false); }
+  }, [ci]);
+
+  const choices = [
+    q?.choice_a && { id: "A", text: q.choice_a },
+    q?.choice_b && { id: "B", text: q.choice_b },
+    q?.choice_c && { id: "C", text: q.choice_c },
+    q?.choice_d && { id: "D", text: q.choice_d },
+  ].filter(Boolean);
+
+  const submit = () => {
+    if (!selected || !q) return;
+    const isCorrect = selected === q.correct_answer;
+    setAnswers(a => ({ ...a, [q.id]: { selected, correct: isCorrect } }));
+    setSubmitted(true);
+    // Save to Supabase
+    try {
+      onSaveProgress({
+        user_id: supabase.getUser()?.id,
+        question_id: q.id,
+        certification_id: CONFIG.CERTIFICATION_ID,
+        is_used: true,
+        is_correct: isCorrect,
+        selected_answer: selected,
+        time_spent_seconds: elapsed,
+        mode: config.mode,
+      });
+    } catch {}
+  };
+
+  const next = () => { if (ci < qs.length - 1) setCi(ci + 1); };
+  const prev = () => { if (ci > 0) setCi(ci - 1); };
+  const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+  const endBlock = () => {
+    const correct = Object.values(answers).filter(a => a.correct).length;
+    const total = Object.keys(answers).length;
+    showToast(`Block complete! ${correct}/${total} correct (${total > 0 ? Math.round(correct / total * 100) : 0}%)`);
+    onExit();
+  };
+
+  const getExplanation = (choiceId) => {
+    const key = `explanation_${choiceId.toLowerCase()}`;
+    return q?.[key] || "";
+  };
+
+  if (!q) return null;
+  const answered = answers[q.id];
+
+  return (
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "white" }}>
+      {/* Top Bar */}
+      <div style={{ height: 50, background: "#1e2a3a", display: "flex", alignItems: "center", padding: "0 20px",
+        justifyContent: "space-between", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <span style={{ color: "white", fontWeight: 700, fontSize: 14 }}>{B.icon} {B.name}</span>
+          <span style={{ color: "#8896a6", fontSize: 13 }}>{config.mode === "tutor" ? "Tutor" : "Timed"} Mode</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <span style={{ color: "#8896a6", fontFamily: "'JetBrains Mono'", fontSize: 13 }}>{fmt(elapsed)}</span>
+          <span style={{ color: "white", fontWeight: 600, fontSize: 14 }}>Q {ci + 1}/{qs.length}</span>
+          <button onClick={endBlock} style={{ background: "#DC2626", color: "white", padding: "6px 14px",
+            borderRadius: 6, fontSize: 13, fontWeight: 600 }}>End</button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        {/* Left: Question */}
+        <div style={{ flex: 1, overflow: "auto", padding: "28px 32px", borderRight: submitted ? "1px solid #eef1f4" : "none" }}>
+          {/* Stem */}
+          <div style={{ fontSize: 15, lineHeight: 1.8, marginBottom: 28, whiteSpace: "pre-wrap", color: "#1a2332" }}>
+            {q.stem}
+          </div>
+
+          {/* Choices */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {choices.map(c => {
+              const isSelected = selected === c.id;
+              const isCorrect = c.id === q.correct_answer;
+              let borderColor = isSelected && !submitted ? B.accent : "#e2e7ed";
+              let bg = "white";
+              if (submitted && isCorrect) { bg = "#F0FDF4"; borderColor = "#059669"; }
+              if (submitted && isSelected && !isCorrect) { bg = "#FEF2F2"; borderColor = "#DC2626"; }
+
+              return (
+                <button key={c.id} onClick={() => !submitted && setSelected(c.id)}
+                  style={{ width: "100%", display: "flex", alignItems: "flex-start", gap: 14, padding: "14px 18px",
+                    border: `2px solid ${borderColor}`, borderRadius: 10, background: bg,
+                    cursor: submitted ? "default" : "pointer", textAlign: "left", transition: "all 0.15s" }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
+                    border: `2px solid ${submitted ? (isCorrect ? "#059669" : isSelected ? "#DC2626" : "#d1d5db") : (isSelected ? B.accent : "#d1d5db")}`,
+                    background: submitted ? (isCorrect ? "#059669" : isSelected ? "#DC2626" : "white") : (isSelected ? B.accent : "white"),
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    color: "white", fontSize: 13, fontWeight: 700 }}>
+                    {submitted ? (isCorrect ? "✓" : isSelected ? "✗" : c.id) : (isSelected ? "●" : c.id)}
+                  </div>
+                  <span style={{ fontSize: 15, lineHeight: 1.6 }}>{c.text}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right: Explanation */}
+        {submitted && config.mode === "tutor" && (
+          <div style={{ flex: 1, overflow: "auto", padding: "28px 32px", background: "#FAFBFC" }}>
+            <div style={{ padding: "14px 18px", borderRadius: 10, marginBottom: 20,
+              background: answered?.correct ? "#F0FDF4" : "#FEF2F2",
+              border: `1px solid ${answered?.correct ? "#BBF7D0" : "#FECACA"}` }}>
+              <span style={{ fontWeight: 700, fontSize: 15, color: answered?.correct ? "#166534" : "#991B1B" }}>
+                {answered?.correct ? "✅ Correct!" : `❌ Incorrect — answer is ${q.correct_answer}`}
+              </span>
+            </div>
+
+            {q.educational_objective && (
+              <div style={{ padding: "14px 18px", background: "#EFF6FF", border: "1px solid #BFDBFE",
+                borderRadius: 10, marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#1E40AF", textTransform: "uppercase",
+                  letterSpacing: "0.06em", marginBottom: 6 }}>Educational Objective</div>
+                <div style={{ fontSize: 14, color: "#1E3A5F", lineHeight: 1.6 }}>{q.educational_objective}</div>
+              </div>
+            )}
+
+            {q.rationale && (
+              <div style={{ marginBottom: 24 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Explanation</h3>
+                <div style={{ fontSize: 14, lineHeight: 1.8, color: "#374151", whiteSpace: "pre-wrap" }}>{q.rationale}</div>
+              </div>
+            )}
+
+            <div style={{ marginBottom: 24 }}>
+              <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Answer Choices</h3>
+              {choices.map(c => {
+                const isCorrect = c.id === q.correct_answer;
+                const exp = getExplanation(c.id);
+                return (
+                  <div key={c.id} style={{ padding: "12px 14px", marginBottom: 6, borderRadius: 8,
+                    border: `1px solid ${isCorrect ? "#BBF7D0" : "#e2e7ed"}`,
+                    background: isCorrect ? "#F0FDF4" : "white" }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: exp ? 6 : 0 }}>
+                      <span style={{ color: isCorrect ? "#059669" : "#6B7280", marginRight: 6 }}>{c.id}.</span>
+                      {c.text}
+                    </div>
+                    {exp && <div style={{ fontSize: 13, color: "#4B5563", lineHeight: 1.6, paddingLeft: 20 }}>{exp}</div>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {q.references_text && (
+              <div style={{ padding: "10px 14px", background: "#F9FAFB", border: "1px solid #e2e7ed",
+                borderRadius: 8, fontSize: 13, color: "#6B7280" }}>
+                <strong>References:</strong> {q.references_text}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom */}
+      <div style={{ height: 56, background: "#FAFBFC", borderTop: "1px solid #eef1f4", display: "flex",
+        alignItems: "center", justifyContent: "space-between", padding: "0 24px", flexShrink: 0 }}>
+        <button onClick={prev} disabled={ci === 0}
+          style={{ padding: "10px 20px", background: "white", border: "1px solid #e2e7ed", borderRadius: 8,
+            fontSize: 14, fontWeight: 500, color: ci === 0 ? "#ccc" : "#5a6a7a" }}>← Previous</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {!submitted && selected && (
+            <button onClick={submit} style={{ padding: "10px 28px", background: B.accent, color: "white",
+              borderRadius: 8, fontSize: 14, fontWeight: 700 }}>Submit</button>
+          )}
+          {submitted && (
+            <button onClick={ci < qs.length - 1 ? next : endBlock}
+              style={{ padding: "10px 28px", background: B.accent, color: "white",
+                borderRadius: 8, fontSize: 14, fontWeight: 700 }}>
+              {ci < qs.length - 1 ? "Next →" : "Finish ✓"}
+            </button>
+          )}
+        </div>
+        <span style={{ fontSize: 13, color: "#8896a6" }}>{ci + 1}/{qs.length}</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// UPGRADE SCREEN
+// ============================================================
+function UpgradeScreen({ brand, access, subscription, onBack }) {
+  const B = brand;
+  return (
+    <div style={{ minHeight: "100vh", background: "#F8FAFB" }}>
+      <div style={{ background: "white", borderBottom: "1px solid #eef1f4", padding: "0 24px" }}>
+        <div style={{ maxWidth: 700, margin: "0 auto", display: "flex", alignItems: "center", height: 60, gap: 14 }}>
+          <button onClick={onBack} style={{ background: "none", fontSize: 14, color: "#8896a6" }}>← Back</button>
+          <span style={{ fontWeight: 700, fontSize: 17 }}>Upgrade Your Plan</span>
+        </div>
+      </div>
+      <div style={{ maxWidth: 700, margin: "0 auto", padding: "40px 24px" }}>
+        <div style={{ textAlign: "center", marginBottom: 40 }}>
+          <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 8 }}>
+            Unlock All Questions
+          </h1>
+          <p style={{ fontSize: 15, color: "#8896a6" }}>
+            Get full access to every question, domain, and study mode.
+          </p>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+          {[
+            { label: "30 Days", price: "$49", period: "one-time", link: CONFIG.STRIPE_LINKS.monthly, popular: false },
+            { label: "90 Days", price: "$79", period: "one-time", link: CONFIG.STRIPE_LINKS.quarterly, popular: true },
+            { label: "12 Months", price: "$99", period: "one-time", link: CONFIG.STRIPE_LINKS.annual, popular: false },
+          ].map(plan => (
+            <div key={plan.label} style={{ background: "white", border: plan.popular ? `2px solid ${B.accent}` : "1px solid #eef1f4",
+              borderRadius: 16, padding: "28px 22px", textAlign: "center", position: "relative" }}>
+              {plan.popular && (
+                <div style={{ position: "absolute", top: -12, left: "50%", transform: "translateX(-50%)",
+                  background: B.accent, color: "white", padding: "4px 14px", borderRadius: 20,
+                  fontSize: 11, fontWeight: 700 }}>MOST POPULAR</div>
+              )}
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#5a6a7a", marginBottom: 8 }}>{plan.label}</div>
+              <div style={{ fontSize: 36, fontWeight: 800, color: "#1a2332", marginBottom: 4 }}>{plan.price}</div>
+              <div style={{ fontSize: 13, color: "#8896a6", marginBottom: 20 }}>{plan.period}</div>
+              <a href={plan.link} target="_blank" rel="noopener noreferrer"
+                style={{ display: "block", padding: "12px", background: plan.popular ? B.accent : "white",
+                  color: plan.popular ? "white" : B.accent, border: `2px solid ${B.accent}`,
+                  borderRadius: 10, fontSize: 14, fontWeight: 700, textDecoration: "none",
+                  transition: "opacity 0.2s" }}>
+                Get Access
+              </a>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 32, textAlign: "center", fontSize: 13, color: "#8896a6" }}>
+          30-day money-back guarantee · Instant access after payment · Secure checkout via Stripe
+        </div>
+      </div>
+    </div>
+  );
+}
