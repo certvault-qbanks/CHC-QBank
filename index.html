@@ -556,7 +556,7 @@
     const SUPABASE_KEY = "sb_publishable_t6YuUYq4TYn3q0DfAXNF_Q_N1LmeaU3";
 
     // QBank app URL — where users go after signup/login
-    const APP_URL = "https://certvault-qbanks.github.io/chc-qbank/app/";
+    const APP_URL = "https://certvault-qbanks.github.io/CHC-QBank/app/";
 
     // ============================================================
     // AUTH FUNCTIONS
@@ -628,6 +628,7 @@
           access_token: data.access_token, refresh_token: data.refresh_token, user: data.user
         }));
 
+        // Redirect to app
         window.location.href = APP_URL;
       } catch (err) {
         errEl.textContent = err.message;
