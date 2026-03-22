@@ -13,10 +13,14 @@
     ::-webkit-scrollbar { width: 5px; }
     ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
     button { cursor: pointer; border: none; font-family: inherit; }
+    button:disabled { cursor: default; opacity: 0.5; }
     input { outline: none; font-family: inherit; }
     @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.6;} }
     .fu { animation: fadeUp 0.4s ease-out forwards; opacity: 0; }
+    .btn-hover:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    .btn-hover:active { transform: translateY(0); }
   </style>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -25,7 +29,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback } = React;
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
     // ============================================================
     // CONFIG
@@ -49,10 +53,12 @@
       },
       FREE_QUESTION_LIMIT: 50,
       LANDING_URL: "https://certvault-qbanks.github.io/CHC-QBank/",
+      // Timed exam: seconds per question (CHC exam ≈ 150 Qs in 3 hrs = ~72s/Q)
+      SECONDS_PER_QUESTION: 72,
     };
 
     // ============================================================
-    // SUPABASE CLIENT
+    // SUPABASE CLIENT (unchanged except progress fetch added)
     // ============================================================
     class SB {
       constructor(url, key) {
@@ -85,12 +91,18 @@
         let u=`${this.url}/rest/v1/${table}?select=${select}`; filters.forEach(f=>{u+=`&${f}`;});
         const o={method,headers:{...this._h(),Prefer:upsert?"resolution=merge-duplicates,return=representation":method==="POST"?"return=representation":"return=representation"}};
         if(body)o.body=JSON.stringify(body); if(upsert)o.headers["Prefer"]="resolution=merge-duplicates,return=representation";
-        const r=await fetch(u,o); const d=await r.json(); if(single&&Array.isArray(d))return d[0]||null; return d;
+        const r=await fetch(u,o);
+        if(!r.ok) { const err = await r.json().catch(()=>({})); throw new Error(err.message || `Request failed: ${r.status}`); }
+        const d=await r.json(); if(single&&Array.isArray(d))return d[0]||null; return d;
       }
       async getSub(cid) { const u=this.getUser(); if(!u)return null; return this.q("user_subscriptions",{filters:[`user_id=eq.${u.id}`,`certification_id=eq.${cid}`,`status=eq.active`],single:true}); }
       async createTrial(cid) { const u=this.getUser(); if(!u)return; return this.q("user_subscriptions",{method:"POST",upsert:true,body:{user_id:u.id,certification_id:cid,plan:"free_trial",status:"active",trial_ends_at:new Date(Date.now()+7*86400000).toISOString()}}); }
-      async getQuestions(cid,limit=500) { return this.q("questions",{filters:[`certification_id=eq.${cid}`,`is_active=eq.true`,`limit=${limit}`]}); }
+      async getQuestions(cid,limit=1000) { return this.q("questions",{filters:[`certification_id=eq.${cid}`,`is_active=eq.true`,`limit=${limit}`]}); }
       async getDomains(cid) { return this.q("exam_domains",{filters:[`certification_id=eq.${cid}`,`order=sort_order.asc`]}); }
+      async getProgress(cid) {
+        const u=this.getUser(); if(!u) return [];
+        return this.q("user_question_progress",{filters:[`user_id=eq.${u.id}`,`certification_id=eq.${cid}`]});
+      }
       async saveProgress(p) { return this.q("user_question_progress",{method:"POST",body:p}); }
     }
 
@@ -98,88 +110,170 @@
     const B = CONFIG.BRAND;
 
     // ============================================================
+    // UTILITIES
+    // ============================================================
+
+    // Fisher-Yates shuffle (returns new array)
+    function shuffle(arr) {
+      const a = [...arr];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+
+    // Leitner-based adaptive question selector
+    // Assigns each question a "box" (1-5) based on history.
+    // Box 1 = never seen or recently wrong → highest priority
+    // Box 5 = correct multiple times → lowest priority
+    function buildAdaptiveQueue(questions, progressRecords) {
+      // Build a map: question_id → array of attempts (sorted by date)
+      const historyMap = {};
+      progressRecords.forEach(p => {
+        if (!historyMap[p.question_id]) historyMap[p.question_id] = [];
+        historyMap[p.question_id].push(p);
+      });
+
+      // Assign box levels
+      const scored = questions.map(q => {
+        const hist = historyMap[q.id] || [];
+        if (hist.length === 0) return { q, box: 1, lastSeen: 0 }; // Never seen → box 1
+
+        // Sort attempts by created_at desc
+        hist.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+        const recent = hist.slice(0, 5);
+        const correctStreak = recent.findIndex(h => !h.is_correct);
+        const streak = correctStreak === -1 ? recent.length : correctStreak;
+
+        // Box assignment: streak 0 → box 1, streak 1 → box 2, etc.
+        const box = Math.min(5, streak + 1);
+        // If most recent was wrong, force back to box 1
+        const finalBox = (recent[0] && !recent[0].is_correct) ? 1 : box;
+        const lastSeen = new Date(recent[0]?.created_at || 0).getTime();
+
+        return { q, box: finalBox, lastSeen };
+      });
+
+      // Sort: lower box first (weakest questions), then oldest-seen first
+      scored.sort((a, b) => {
+        if (a.box !== b.box) return a.box - b.box;
+        return a.lastSeen - b.lastSeen;
+      });
+
+      return scored.map(s => s.q);
+    }
+
+    // Format seconds as M:SS or H:MM:SS
+    function fmtTime(s) {
+      if (s < 0) s = 0;
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      if (h > 0) return `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+      return `${m}:${String(sec).padStart(2,"0")}`;
+    }
+
+    // ============================================================
     // APP
     // ============================================================
     function App() {
-      const [user,setUser] = useState(sb.getUser());
-      const [screen,setScreen] = useState(user?"loading":"auth");
-      const [authMode,setAuthMode] = useState("login");
-      const [sub,setSub] = useState(null);
-      const [questions,setQuestions] = useState([]);
-      const [domains,setDomains] = useState([]);
-      const [quizCfg,setQuizCfg] = useState(null);
-      const [error,setError] = useState(null);
-      const [toast,setToast] = useState(null);
+      const [user, setUser] = useState(sb.getUser());
+      const [screen, setScreen] = useState(user ? "loading" : "auth");
+      const [authMode, setAuthMode] = useState("login");
+      const [sub, setSub] = useState(null);
+      const [questions, setQuestions] = useState([]);
+      const [domains, setDomains] = useState([]);
+      const [progress, setProgress] = useState([]);
+      const [quizCfg, setQuizCfg] = useState(null);
+      const [error, setError] = useState(null);
+      const [toast, setToast] = useState(null);
 
-      const showToast = (msg,type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),3500); };
+      const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); };
 
-      useEffect(() => { if(user) loadData(); }, []);
-      useEffect(() => { if(sb.refreshToken) sb.refresh().then(()=>{setUser(sb.getUser()); if(sb.getUser()) loadData();}); }, []);
-      useEffect(() => { const p=new URLSearchParams(window.location.search); if(p.get("upgrade")==="success"){showToast("Payment received! Account upgraded.");window.history.replaceState({},"",window.location.pathname);setTimeout(()=>loadData(),2000);} }, []);
+      useEffect(() => { if (user) loadData(); }, []);
+      useEffect(() => { if (sb.refreshToken) sb.refresh().then(() => { setUser(sb.getUser()); if (sb.getUser()) loadData(); }); }, []);
+      useEffect(() => { const p = new URLSearchParams(window.location.search); if (p.get("upgrade") === "success") { showToast("Payment received! Verifying access..."); window.history.replaceState({}, "", window.location.pathname); setTimeout(() => loadData(), 2000); } }, []);
 
       async function loadData() {
         setScreen("loading");
         try {
           let s = await sb.getSub(CONFIG.CERTIFICATION_ID);
-          if(!s){ await sb.createTrial(CONFIG.CERTIFICATION_ID); s = await sb.getSub(CONFIG.CERTIFICATION_ID); }
+          if (!s) { await sb.createTrial(CONFIG.CERTIFICATION_ID); s = await sb.getSub(CONFIG.CERTIFICATION_ID); }
           setSub(s);
-          const d = await sb.getDomains(CONFIG.CERTIFICATION_ID); setDomains(Array.isArray(d)?d:[]);
-          const q = await sb.getQuestions(CONFIG.CERTIFICATION_ID); setQuestions(Array.isArray(q)?q:[]);
+          const [d, q, prog] = await Promise.all([
+            sb.getDomains(CONFIG.CERTIFICATION_ID),
+            sb.getQuestions(CONFIG.CERTIFICATION_ID),
+            sb.getProgress(CONFIG.CERTIFICATION_ID),
+          ]);
+          setDomains(Array.isArray(d) ? d : []);
+          setQuestions(Array.isArray(q) ? q : []);
+          setProgress(Array.isArray(prog) ? prog : []);
           setScreen("dashboard");
-        } catch(e) { console.error(e); setScreen("dashboard"); }
+        } catch (e) { console.error(e); setScreen("dashboard"); }
       }
 
       function access() {
-        if(!sub) return "none";
-        const now=new Date();
-        if(sub.plan==="free_trial") return new Date(sub.trial_ends_at)>now?"trial":"expired";
-        if(["monthly","quarterly","annual"].includes(sub.plan)) return (!sub.expires_at||new Date(sub.expires_at)>now)?"full":"expired";
+        if (!sub) return "none";
+        const now = new Date();
+        if (sub.plan === "free_trial") return new Date(sub.trial_ends_at) > now ? "trial" : "expired";
+        if (["monthly", "quarterly", "annual"].includes(sub.plan)) {
+          // Require expires_at for paid plans (prevents accidental permanent access)
+          if (!sub.expires_at) return "full"; // fallback if webhook hasn't set it yet
+          return new Date(sub.expires_at) > now ? "full" : "expired";
+        }
         return "none";
       }
 
       const acc = access();
-      const availQ = acc==="full" ? questions : questions.filter(q=>q.is_free).slice(0,CONFIG.FREE_QUESTION_LIMIT);
+      // With RLS in place, the server already filters questions.
+      // This client-side filter is a fallback for graceful display.
+      const availQ = acc === "full" ? questions : questions.filter(q => q.is_free).slice(0, CONFIG.FREE_QUESTION_LIMIT);
 
       return (
-        <div style={{minHeight:"100vh"}}>
-          {toast && <div style={{position:"fixed",top:20,right:20,zIndex:9999,padding:"14px 22px",borderRadius:12,background:toast.type==="success"?B.accent:"#DC2626",color:"white",fontSize:14,fontWeight:600,boxShadow:"0 8px 30px rgba(0,0,0,0.15)",animation:"fadeUp 0.3s ease"}}>{toast.msg}</div>}
+        <div style={{ minHeight: "100vh" }}>
+          {toast && <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, padding: "14px 22px", borderRadius: 12, background: toast.type === "success" ? B.accent : "#DC2626", color: "white", fontSize: 14, fontWeight: 600, boxShadow: "0 8px 30px rgba(0,0,0,0.15)", animation: "fadeUp 0.3s ease" }}>{toast.msg}</div>}
 
-          {screen==="auth" && <Auth mode={authMode} setMode={setAuthMode} error={error} onAuth={async(email,pass,name)=>{
-            try { setError(null); if(authMode==="signup") await sb.signUp(email,pass,name); else await sb.signIn(email,pass); setUser(sb.getUser()); loadData(); showToast(authMode==="signup"?"Account created!":"Welcome back!"); }
-            catch(e){setError(e.message);}
+          {screen === "auth" && <Auth mode={authMode} setMode={setAuthMode} error={error} onAuth={async (email, pass, name) => {
+            try { setError(null); if (authMode === "signup") await sb.signUp(email, pass, name); else await sb.signIn(email, pass); setUser(sb.getUser()); loadData(); showToast(authMode === "signup" ? "Account created!" : "Welcome back!"); }
+            catch (e) { setError(e.message); }
           }} />}
-          {screen==="loading" && <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}><div style={{width:40,height:40,border:"3px solid #eee",borderTopColor:B.accent,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/><span style={{color:"#8896a6",fontSize:14}}>Loading...</span></div>}
-          {screen==="dashboard" && <Dash user={user} acc={acc} sub={sub} questions={questions} availQ={availQ} domains={domains} onQuiz={(c)=>{setQuizCfg(c);setScreen("quiz");}} onNav={setScreen} onLogout={()=>{sb.signOut();setUser(null);setScreen("auth");}} showToast={showToast} />}
-          {screen==="quiz" && quizCfg && <Quiz config={quizCfg} acc={acc} onExit={()=>{loadData();setScreen("dashboard");}} showToast={showToast} />}
-          {screen==="upgrade" && <Upgrade acc={acc} sub={sub} onBack={()=>setScreen("dashboard")} />}
+          {screen === "loading" && <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}><div style={{ width: 40, height: 40, border: "3px solid #eee", borderTopColor: B.accent, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /><span style={{ color: "#8896a6", fontSize: 14 }}>Loading...</span></div>}
+          {screen === "dashboard" && <Dash user={user} acc={acc} sub={sub} questions={questions} availQ={availQ} domains={domains} progress={progress} onQuiz={(c) => { setQuizCfg(c); setScreen("quiz"); }} onNav={setScreen} onLogout={() => { sb.signOut(); setUser(null); setScreen("auth"); }} showToast={showToast} />}
+          {screen === "quiz" && quizCfg && <Quiz config={quizCfg} acc={acc} onExit={() => { loadData(); setScreen("dashboard"); }} showToast={showToast} />}
+          {screen === "upgrade" && <Upgrade acc={acc} sub={sub} onBack={() => setScreen("dashboard")} />}
         </div>
       );
     }
 
     // ============================================================
-    // AUTH
+    // AUTH (unchanged)
     // ============================================================
-    function Auth({mode,setMode,error,onAuth}) {
-      const [email,setEmail]=useState(""); const [pass,setPass]=useState(""); const [name,setName]=useState("");
+    function Auth({ mode, setMode, error, onAuth }) {
+      const [email, setEmail] = useState(""); const [pass, setPass] = useState(""); const [name, setName] = useState("");
+      const [loading, setLoading] = useState(false);
+      const handleSubmit = async () => { setLoading(true); await onAuth(email, pass, name); setLoading(false); };
       return (
-        <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(135deg,${B.accent}08,#F8FAFB 50%,${B.accent}05)`}}>
-          <div className="fu" style={{width:"100%",maxWidth:420,background:"white",borderRadius:20,padding:"40px 36px",boxShadow:"0 4px 24px rgba(0,0,0,0.06)",border:"1px solid #eef1f4"}}>
-            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:32}}>
-              <div style={{width:44,height:44,borderRadius:12,background:B.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>{B.icon}</div>
-              <div><div style={{fontWeight:800,fontSize:18}}>{B.name}</div><div style={{fontSize:12,color:"#8896a6"}}>{B.tagline}</div></div>
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: `linear-gradient(135deg,${B.accent}08,#F8FAFB 50%,${B.accent}05)` }}>
+          <div className="fu" style={{ width: "100%", maxWidth: 420, background: "white", borderRadius: 20, padding: "40px 36px", boxShadow: "0 4px 24px rgba(0,0,0,0.06)", border: "1px solid #eef1f4" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 32 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 12, background: B.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>{B.icon}</div>
+              <div><div style={{ fontWeight: 800, fontSize: 18 }}>{B.name}</div><div style={{ fontSize: 12, color: "#8896a6" }}>{B.tagline}</div></div>
             </div>
-            <h2 style={{fontSize:22,fontWeight:700,marginBottom:4}}>{mode==="login"?"Welcome back":"Create your account"}</h2>
-            <p style={{fontSize:14,color:"#8896a6",marginBottom:28}}>{mode==="login"?"Log in to continue":"Start your 7-day free trial"}</p>
-            {error && <div style={{padding:"10px 14px",background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:10,fontSize:13,color:"#DC2626",marginBottom:16}}>{error}</div>}
-            {mode==="signup" && <><label style={{fontSize:13,fontWeight:600,color:"#5a6a7a",display:"block",marginBottom:6}}>Full Name</label><input value={name} onChange={e=>setName(e.target.value)} placeholder="Jane Doe" style={{width:"100%",padding:"12px 16px",border:"1px solid #e2e7ed",borderRadius:10,fontSize:14,background:"#FAFBFC",marginBottom:14}}/></>}
-            <label style={{fontSize:13,fontWeight:600,color:"#5a6a7a",display:"block",marginBottom:6}}>Email</label>
-            <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" style={{width:"100%",padding:"12px 16px",border:"1px solid #e2e7ed",borderRadius:10,fontSize:14,background:"#FAFBFC",marginBottom:14}}/>
-            <label style={{fontSize:13,fontWeight:600,color:"#5a6a7a",display:"block",marginBottom:6}}>Password</label>
-            <input type="password" value={pass} onChange={e=>setPass(e.target.value)} placeholder="8+ characters" onKeyDown={e=>{if(e.key==="Enter")onAuth(email,pass,name);}} style={{width:"100%",padding:"12px 16px",border:"1px solid #e2e7ed",borderRadius:10,fontSize:14,background:"#FAFBFC"}}/>
-            <button onClick={()=>onAuth(email,pass,name)} style={{width:"100%",padding:"14px",background:B.accent,color:"white",borderRadius:12,fontSize:15,fontWeight:700,marginTop:20}}>{mode==="login"?"Log In":"Start Free Trial →"}</button>
-            <p style={{fontSize:13,color:"#8896a6",textAlign:"center",marginTop:20}}>
-              {mode==="login"?"Don't have an account? ":"Already have an account? "}
-              <span style={{color:B.accent,fontWeight:600,cursor:"pointer"}} onClick={()=>setMode(mode==="login"?"signup":"login")}>{mode==="login"?"Sign up free":"Log in"}</span>
+            <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{mode === "login" ? "Welcome back" : "Create your account"}</h2>
+            <p style={{ fontSize: 14, color: "#8896a6", marginBottom: 28 }}>{mode === "login" ? "Log in to continue" : "Start your 7-day free trial"}</p>
+            {error && <div style={{ padding: "10px 14px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10, fontSize: 13, color: "#DC2626", marginBottom: 16 }}>{error}</div>}
+            {mode === "signup" && <><label style={{ fontSize: 13, fontWeight: 600, color: "#5a6a7a", display: "block", marginBottom: 6 }}>Full Name</label><input value={name} onChange={e => setName(e.target.value)} placeholder="Jane Doe" style={{ width: "100%", padding: "12px 16px", border: "1px solid #e2e7ed", borderRadius: 10, fontSize: 14, background: "#FAFBFC", marginBottom: 14 }} /></>}
+            <label style={{ fontSize: 13, fontWeight: 600, color: "#5a6a7a", display: "block", marginBottom: 6 }}>Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" style={{ width: "100%", padding: "12px 16px", border: "1px solid #e2e7ed", borderRadius: 10, fontSize: 14, background: "#FAFBFC", marginBottom: 14 }} />
+            <label style={{ fontSize: 13, fontWeight: 600, color: "#5a6a7a", display: "block", marginBottom: 6 }}>Password</label>
+            <input type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="8+ characters" onKeyDown={e => { if (e.key === "Enter") handleSubmit(); }} style={{ width: "100%", padding: "12px 16px", border: "1px solid #e2e7ed", borderRadius: 10, fontSize: 14, background: "#FAFBFC" }} />
+            <button onClick={handleSubmit} disabled={loading} className="btn-hover" style={{ width: "100%", padding: "14px", background: B.accent, color: "white", borderRadius: 12, fontSize: 15, fontWeight: 700, marginTop: 20, transition: "all 0.15s" }}>
+              {loading ? "..." : (mode === "login" ? "Log In" : "Start Free Trial →")}
+            </button>
+            <p style={{ fontSize: 13, color: "#8896a6", textAlign: "center", marginTop: 20 }}>
+              {mode === "login" ? "Don't have an account? " : "Already have an account? "}
+              <span style={{ color: B.accent, fontWeight: 600, cursor: "pointer" }} onClick={() => setMode(mode === "login" ? "signup" : "login")}>{mode === "login" ? "Sign up free" : "Log in"}</span>
             </p>
           </div>
         </div>
@@ -187,67 +281,120 @@
     }
 
     // ============================================================
-    // DASHBOARD
+    // DASHBOARD (updated with progress stats + adaptive prep)
     // ============================================================
-    function Dash({user,acc,sub,questions,availQ,domains,onQuiz,onNav,onLogout,showToast}) {
-      const totalQ=questions.length; const freeQ=availQ.length;
-      const daysLeft=sub?.plan==="free_trial"?Math.max(0,Math.ceil((new Date(sub.trial_ends_at)-Date.now())/86400000)):null;
+    function Dash({ user, acc, sub, questions, availQ, domains, progress, onQuiz, onNav, onLogout, showToast }) {
+      const totalQ = questions.length; const freeQ = availQ.length;
+      const daysLeft = sub?.plan === "free_trial" ? Math.max(0, Math.ceil((new Date(sub.trial_ends_at) - Date.now()) / 86400000)) : null;
+
+      // Progress stats
+      const attempted = new Set(progress.map(p => p.question_id)).size;
+      const correctCount = progress.filter(p => p.is_correct).length;
+      const totalAttempts = progress.length;
+      const accuracy = totalAttempts > 0 ? Math.round(correctCount / totalAttempts * 100) : 0;
+
+      // Count weak questions (most recent attempt was wrong)
+      const latestByQ = {};
+      progress.forEach(p => {
+        const existing = latestByQ[p.question_id];
+        if (!existing || new Date(p.created_at || 0) > new Date(existing.created_at || 0)) {
+          latestByQ[p.question_id] = p;
+        }
+      });
+      const weakCount = Object.values(latestByQ).filter(p => !p.is_correct).length;
+
+      const startQuiz = (mode) => {
+        if (availQ.length === 0) { showToast("No questions available yet", "error"); return; }
+        let qs;
+        if (mode === "adaptive") {
+          qs = buildAdaptiveQueue(availQ, progress);
+        } else {
+          qs = shuffle(availQ);
+        }
+        onQuiz({ mode, questions: qs });
+      };
+
       return (
-        <div style={{minHeight:"100vh"}}>
-          <div style={{background:"white",borderBottom:"1px solid #eef1f4",padding:"0 24px"}}>
-            <div style={{maxWidth:960,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center",height:60}}>
-              <div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:22}}>{B.icon}</span><span style={{fontWeight:800,fontSize:17}}>{B.name}</span></div>
-              <div style={{display:"flex",alignItems:"center",gap:12}}>
-                {acc!=="full" && <button onClick={()=>onNav("upgrade")} style={{padding:"8px 18px",background:B.accent,color:"white",borderRadius:8,fontSize:13,fontWeight:700}}>Upgrade</button>}
-                <div style={{width:34,height:34,borderRadius:"50%",background:B.accent,display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontWeight:700,fontSize:14}}>{(user?.user_metadata?.full_name||user?.email||"U")[0].toUpperCase()}</div>
-                <button onClick={onLogout} style={{background:"none",fontSize:13,color:"#8896a6"}}>Log out</button>
+        <div style={{ minHeight: "100vh" }}>
+          {/* Nav */}
+          <div style={{ background: "white", borderBottom: "1px solid #eef1f4", padding: "0 24px" }}>
+            <div style={{ maxWidth: 960, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", height: 60 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}><span style={{ fontSize: 22 }}>{B.icon}</span><span style={{ fontWeight: 800, fontSize: 17 }}>{B.name}</span></div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {acc !== "full" && <button onClick={() => onNav("upgrade")} className="btn-hover" style={{ padding: "8px 18px", background: B.accent, color: "white", borderRadius: 8, fontSize: 13, fontWeight: 700, transition: "all 0.15s" }}>Upgrade</button>}
+                <div style={{ width: 34, height: 34, borderRadius: "50%", background: B.accent, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontWeight: 700, fontSize: 14 }}>{(user?.user_metadata?.full_name || user?.email || "U")[0].toUpperCase()}</div>
+                <button onClick={onLogout} style={{ background: "none", fontSize: 13, color: "#8896a6" }}>Log out</button>
               </div>
             </div>
           </div>
-          <div style={{maxWidth:960,margin:"0 auto",padding:"28px 24px"}}>
-            {acc==="trial"&&daysLeft!==null && <div className="fu" style={{background:`linear-gradient(135deg,${B.accent}12,${B.accent}06)`,border:`1px solid ${B.accent}25`,borderRadius:14,padding:"16px 22px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24,flexWrap:"wrap",gap:12}}>
-              <div><span style={{fontSize:14,fontWeight:600,color:B.accent}}>Free Trial — {daysLeft} days remaining</span><span style={{fontSize:13,color:"#8896a6",marginLeft:12}}>{freeQ} of {totalQ} questions</span></div>
-              <button onClick={()=>onNav("upgrade")} style={{padding:"8px 20px",background:B.accent,color:"white",borderRadius:8,fontSize:13,fontWeight:700}}>Unlock All {totalQ} →</button>
+
+          <div style={{ maxWidth: 960, margin: "0 auto", padding: "28px 24px" }}>
+            {/* Trial / Expired / Full banners (unchanged) */}
+            {acc === "trial" && daysLeft !== null && <div className="fu" style={{ background: `linear-gradient(135deg,${B.accent}12,${B.accent}06)`, border: `1px solid ${B.accent}25`, borderRadius: 14, padding: "16px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
+              <div><span style={{ fontSize: 14, fontWeight: 600, color: B.accent }}>Free Trial — {daysLeft} days remaining</span><span style={{ fontSize: 13, color: "#8896a6", marginLeft: 12 }}>{freeQ} of {totalQ} questions</span></div>
+              <button onClick={() => onNav("upgrade")} className="btn-hover" style={{ padding: "8px 20px", background: B.accent, color: "white", borderRadius: 8, fontSize: 13, fontWeight: 700, transition: "all 0.15s" }}>Unlock All {totalQ} →</button>
             </div>}
-            {acc==="expired" && <div className="fu" style={{background:"#FEF2F2",border:"1px solid #FECACA",borderRadius:14,padding:"16px 22px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24,flexWrap:"wrap",gap:12}}>
-              <span style={{fontSize:14,fontWeight:600,color:"#DC2626"}}>Your {sub?.plan==="free_trial"?"free trial":"subscription"} has expired</span>
-              <button onClick={()=>onNav("upgrade")} style={{padding:"8px 20px",background:"#DC2626",color:"white",borderRadius:8,fontSize:13,fontWeight:700}}>Upgrade Now</button>
+            {acc === "expired" && <div className="fu" style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 14, padding: "16px 22px", display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#DC2626" }}>Your {sub?.plan === "free_trial" ? "free trial" : "subscription"} has expired</span>
+              <button onClick={() => onNav("upgrade")} className="btn-hover" style={{ padding: "8px 20px", background: "#DC2626", color: "white", borderRadius: 8, fontSize: 13, fontWeight: 700, transition: "all 0.15s" }}>Upgrade Now</button>
             </div>}
-            {acc==="full" && <div className="fu" style={{background:"#F0FDF4",border:"1px solid #BBF7D0",borderRadius:14,padding:"14px 22px",marginBottom:24}}>
-              <span style={{fontSize:14,fontWeight:600,color:"#166534"}}>✓ Full Access — {totalQ} questions</span>
-              {sub?.expires_at && <span style={{fontSize:13,color:"#15803D"}}> · Expires {new Date(sub.expires_at).toLocaleDateString()}</span>}
+            {acc === "full" && <div className="fu" style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 14, padding: "14px 22px", marginBottom: 24 }}>
+              <span style={{ fontSize: 14, fontWeight: 600, color: "#166534" }}>✓ Full Access — {totalQ} questions</span>
+              {sub?.expires_at && <span style={{ fontSize: 13, color: "#15803D" }}> · Expires {new Date(sub.expires_at).toLocaleDateString()}</span>}
             </div>}
 
-            <div className="fu" style={{marginBottom:28}}><h1 style={{fontSize:24,fontWeight:800,marginBottom:4}}>Welcome{user?.user_metadata?.full_name?`, ${user.user_metadata.full_name.split(" ")[0]}`:""}</h1><p style={{fontSize:14,color:"#8896a6"}}>Choose a study mode to begin.</p></div>
+            {/* Welcome */}
+            <div className="fu" style={{ marginBottom: 28 }}>
+              <h1 style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>Welcome{user?.user_metadata?.full_name ? `, ${user.user_metadata.full_name.split(" ")[0]}` : ""}</h1>
+              <p style={{ fontSize: 14, color: "#8896a6" }}>Choose a study mode to begin.</p>
+            </div>
 
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14,marginBottom:36}}>
-              {[{mode:"tutor",icon:"📖",title:"Tutor Mode",desc:"See explanations after each question.",tag:"Recommended"},
-                {mode:"timed",icon:"⏱️",title:"Timed Exam",desc:"Simulate real exam conditions.",tag:"Exam Prep"},
-                {mode:"adaptive",icon:"🧠",title:"Adaptive Review",desc:"AI focuses on your weak areas.",tag:"Smart"}
-              ].map(m=>(
-                <button key={m.mode} onClick={()=>{if(availQ.length===0){showToast("No questions available yet","error");return;} onQuiz({mode:m.mode,questions:availQ});}}
-                  style={{background:"white",border:"1px solid #eef1f4",borderRadius:16,padding:"22px 20px",textAlign:"left",transition:"all 0.15s"}}
-                  onMouseEnter={e=>{e.currentTarget.style.borderColor=B.accent;e.currentTarget.style.transform="translateY(-2px)";}}
-                  onMouseLeave={e=>{e.currentTarget.style.borderColor="#eef1f4";e.currentTarget.style.transform="translateY(0)";}}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}><span style={{fontSize:26}}>{m.icon}</span><span style={{fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:6,background:B.accentDim,color:B.accent}}>{m.tag}</span></div>
-                  <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{m.title}</div><div style={{fontSize:13,color:"#8896a6",lineHeight:1.5}}>{m.desc}</div>
+            {/* Progress stats row */}
+            {totalAttempts > 0 && <div className="fu" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 12, marginBottom: 24 }}>
+              {[
+                { label: "Attempted", value: `${attempted}/${availQ.length}`, color: B.accent },
+                { label: "Accuracy", value: `${accuracy}%`, color: accuracy >= 70 ? "#059669" : accuracy >= 50 ? "#D97706" : "#DC2626" },
+                { label: "Total Answers", value: totalAttempts, color: "#6B7280" },
+                { label: "Needs Review", value: weakCount, color: weakCount > 0 ? "#DC2626" : "#059669" },
+              ].map(s => (
+                <div key={s.label} style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 12, padding: "16px 18px" }}>
+                  <div style={{ fontSize: 12, color: "#8896a6", fontWeight: 600, marginBottom: 4 }}>{s.label}</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: s.color }}>{s.value}</div>
+                </div>
+              ))}
+            </div>}
+
+            {/* Study modes */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 14, marginBottom: 36 }}>
+              {[
+                { mode: "tutor", icon: "📖", title: "Tutor Mode", desc: "See explanations after each question. Questions randomized each session.", tag: "Recommended" },
+                { mode: "timed", icon: "⏱️", title: "Timed Exam", desc: `Simulate real exam conditions — ${CONFIG.SECONDS_PER_QUESTION}s per question, auto-submit at time.`, tag: "Exam Prep" },
+                { mode: "adaptive", icon: "🧠", title: "Adaptive Review", desc: `Prioritizes your ${weakCount > 0 ? weakCount + " weak" : "unseen"} questions using spaced repetition.`, tag: "Smart" },
+              ].map(m => (
+                <button key={m.mode} onClick={() => startQuiz(m.mode)}
+                  style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 16, padding: "22px 20px", textAlign: "left", transition: "all 0.15s" }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = B.accent; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(15,118,110,0.08)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = "#eef1f4"; e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "none"; }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}><span style={{ fontSize: 26 }}>{m.icon}</span><span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 6, background: B.accentDim, color: B.accent }}>{m.tag}</span></div>
+                  <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{m.title}</div><div style={{ fontSize: 13, color: "#8896a6", lineHeight: 1.5 }}>{m.desc}</div>
                 </button>
               ))}
             </div>
 
-            {domains.length>0 && <div style={{background:"white",border:"1px solid #eef1f4",borderRadius:16,padding:24}}>
-              <h3 style={{fontSize:16,fontWeight:700,marginBottom:16}}>Exam Domains</h3>
-              {domains.map((d,i)=>{const dq=questions.filter(q=>q.domain_id===d.id).length; return(
-                <div key={d.id} style={{padding:"12px 0",borderBottom:i<domains.length-1?"1px solid #f3f5f7":"none",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div><span style={{fontSize:14,fontWeight:500}}>{d.name}</span><span style={{fontSize:12,color:"#8896a6",marginLeft:8}}>{dq} questions</span></div>
-                  <span style={{fontSize:13,fontWeight:700,color:B.accent}}>{d.weight_percent}%</span>
+            {/* Exam domains */}
+            {domains.length > 0 && <div style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 16, padding: 24 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>Exam Domains</h3>
+              {domains.map((d, i) => { const dq = questions.filter(q => q.domain_id === d.id).length; return (
+                <div key={d.id} style={{ padding: "12px 0", borderBottom: i < domains.length - 1 ? "1px solid #f3f5f7" : "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div><span style={{ fontSize: 14, fontWeight: 500 }}>{d.name}</span><span style={{ fontSize: 12, color: "#8896a6", marginLeft: 8 }}>{dq} questions</span></div>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: B.accent }}>{d.weight_percent}%</span>
                 </div>);
               })}
             </div>}
 
-            {questions.length===0 && <div style={{background:"white",border:"1px solid #eef1f4",borderRadius:16,padding:48,textAlign:"center"}}>
-              <div style={{fontSize:40,marginBottom:12}}>📝</div><div style={{fontSize:16,fontWeight:700,marginBottom:4}}>No questions yet</div>
-              <div style={{fontSize:14,color:"#8896a6"}}>Questions are being added. Check back soon!</div>
+            {questions.length === 0 && <div style={{ background: "white", border: "1px solid #eef1f4", borderRadius: 16, padding: 48, textAlign: "center" }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📝</div><div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>No questions yet</div>
+              <div style={{ fontSize: 14, color: "#8896a6" }}>Questions are being added. Check back soon!</div>
             </div>}
           </div>
         </div>
@@ -255,95 +402,233 @@
     }
 
     // ============================================================
-    // QUIZ
+    // QUIZ (major updates: timer modes, randomization, save retry)
     // ============================================================
-    function Quiz({config,acc,onExit,showToast}) {
-      const qs=config.questions; const [ci,setCi]=useState(0); const [sel,setSel]=useState(null); const [done,setDone]=useState(false);
-      const [answers,setAnswers]=useState({}); const [elapsed,setElapsed]=useState(0); const q=qs[ci];
+    function Quiz({ config, acc, onExit, showToast }) {
+      const qs = config.questions;
+      const [ci, setCi] = useState(0);
+      const [sel, setSel] = useState(null);
+      const [done, setDone] = useState(false);
+      const [answers, setAnswers] = useState({});
+      const [elapsed, setElapsed] = useState(0);
+      const [timeLeft, setTimeLeft] = useState(
+        config.mode === "timed" ? qs.length * CONFIG.SECONDS_PER_QUESTION : null
+      );
+      const [autoSubmitted, setAutoSubmitted] = useState(false);
+      const [saveQueue, setSaveQueue] = useState([]);
+      const timerRef = useRef(null);
+      const q = qs[ci];
 
-      useEffect(()=>{const t=setInterval(()=>setElapsed(e=>e+1),1000);return()=>clearInterval(t);},[]);
-      useEffect(()=>{const a=answers[q?.id];if(a){setSel(a.selected);setDone(true);}else{setSel(null);setDone(false);}},[ci]);
+      // Timer logic
+      useEffect(() => {
+        timerRef.current = setInterval(() => {
+          setElapsed(e => e + 1);
+          if (config.mode === "timed") {
+            setTimeLeft(t => {
+              if (t !== null && t <= 1) {
+                // Time's up — auto-end the exam
+                clearInterval(timerRef.current);
+                setAutoSubmitted(true);
+                return 0;
+              }
+              return t !== null ? t - 1 : null;
+            });
+          }
+        }, 1000);
+        return () => clearInterval(timerRef.current);
+      }, []);
 
-      const choices=[q?.choice_a&&{id:"A",text:q.choice_a},q?.choice_b&&{id:"B",text:q.choice_b},q?.choice_c&&{id:"C",text:q.choice_c},q?.choice_d&&{id:"D",text:q.choice_d}].filter(Boolean);
+      // Auto-end when time runs out
+      useEffect(() => {
+        if (autoSubmitted) {
+          const c = Object.values(answers).filter(a => a.correct).length;
+          const t = Object.keys(answers).length;
+          showToast(`⏰ Time's up! ${c}/${t} correct (${t > 0 ? Math.round(c / t * 100) : 0}%)`);
+          setTimeout(() => onExit(), 1500);
+        }
+      }, [autoSubmitted]);
 
-      const submit=()=>{if(!sel||!q)return;const ok=sel===q.correct_answer;setAnswers(a=>({...a,[q.id]:{selected:sel,correct:ok}}));setDone(true);
-        try{sb.saveProgress({user_id:sb.getUser()?.id,question_id:q.id,certification_id:CONFIG.CERTIFICATION_ID,is_used:true,is_correct:ok,selected_answer:sel,time_spent_seconds:elapsed,mode:config.mode});}catch{}};
-      const next=()=>{if(ci<qs.length-1)setCi(ci+1);}; const prev=()=>{if(ci>0)setCi(ci-1);};
-      const fmt=s=>`${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
-      const end=()=>{const c=Object.values(answers).filter(a=>a.correct).length;const t=Object.keys(answers).length;showToast(`Block complete! ${c}/${t} correct (${t>0?Math.round(c/t*100):0}%)`);onExit();};
-      const getExp=id=>q?.[`explanation_${id.toLowerCase()}`]||"";
-      if(!q)return null; const ans=answers[q.id];
+      // Restore answer state when navigating questions
+      useEffect(() => {
+        const a = answers[q?.id];
+        if (a) { setSel(a.selected); setDone(true); }
+        else { setSel(null); setDone(false); }
+      }, [ci]);
+
+      // Retry failed saves
+      useEffect(() => {
+        if (saveQueue.length === 0) return;
+        const timer = setTimeout(async () => {
+          const failed = [];
+          for (const p of saveQueue) {
+            try { await sb.saveProgress(p); } catch { failed.push(p); }
+          }
+          setSaveQueue(failed);
+        }, 5000);
+        return () => clearTimeout(timer);
+      }, [saveQueue]);
+
+      const choices = [
+        q?.choice_a && { id: "A", text: q.choice_a },
+        q?.choice_b && { id: "B", text: q.choice_b },
+        q?.choice_c && { id: "C", text: q.choice_c },
+        q?.choice_d && { id: "D", text: q.choice_d },
+      ].filter(Boolean);
+
+      const submit = () => {
+        if (!sel || !q) return;
+        const ok = sel === q.correct_answer;
+        setAnswers(a => ({ ...a, [q.id]: { selected: sel, correct: ok } }));
+        setDone(true);
+
+        const progressData = {
+          user_id: sb.getUser()?.id,
+          question_id: q.id,
+          certification_id: CONFIG.CERTIFICATION_ID,
+          is_used: true,
+          is_correct: ok,
+          selected_answer: sel,
+          time_spent_seconds: elapsed,
+          mode: config.mode,
+        };
+
+        sb.saveProgress(progressData).catch(() => {
+          // Queue for retry instead of silently failing
+          setSaveQueue(prev => [...prev, progressData]);
+        });
+      };
+
+      const next = () => { if (ci < qs.length - 1) setCi(ci + 1); };
+      const prev = () => { if (ci > 0) setCi(ci - 1); };
+
+      const end = () => {
+        const c = Object.values(answers).filter(a => a.correct).length;
+        const t = Object.keys(answers).length;
+        showToast(`Block complete! ${c}/${t} correct (${t > 0 ? Math.round(c / t * 100) : 0}%)`);
+        onExit();
+      };
+
+      const getExp = id => q?.[`explanation_${id.toLowerCase()}`] || "";
+      if (!q) return null;
+      const ans = answers[q.id];
+
+      // Timer warning thresholds
+      const timeUrgent = timeLeft !== null && timeLeft < 60;
+      const timeLow = timeLeft !== null && timeLeft < 300;
 
       return (
-        <div style={{height:"100vh",display:"flex",flexDirection:"column",background:"white"}}>
-          <div style={{height:50,background:"#1e2a3a",display:"flex",alignItems:"center",padding:"0 20px",justifyContent:"space-between",flexShrink:0}}>
-            <div style={{display:"flex",alignItems:"center",gap:14}}><span style={{color:"white",fontWeight:700,fontSize:14}}>{B.icon} {B.name}</span><span style={{color:"#8896a6",fontSize:13}}>{config.mode==="tutor"?"Tutor":"Timed"}</span></div>
-            <div style={{display:"flex",alignItems:"center",gap:16}}><span style={{color:"#8896a6",fontFamily:"'JetBrains Mono'",fontSize:13}}>{fmt(elapsed)}</span><span style={{color:"white",fontWeight:600,fontSize:14}}>Q {ci+1}/{qs.length}</span><button onClick={end} style={{background:"#DC2626",color:"white",padding:"6px 14px",borderRadius:6,fontSize:13,fontWeight:600}}>End</button></div>
+        <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "white" }}>
+          {/* Top bar */}
+          <div style={{ height: 50, background: "#1e2a3a", display: "flex", alignItems: "center", padding: "0 20px", justifyContent: "space-between", flexShrink: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <span style={{ color: "white", fontWeight: 700, fontSize: 14 }}>{B.icon} {B.name}</span>
+              <span style={{ color: "#8896a6", fontSize: 13 }}>
+                {config.mode === "tutor" ? "Tutor" : config.mode === "timed" ? "Timed Exam" : "Adaptive Review"}
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+              {/* Timer display */}
+              {config.mode === "timed" ? (
+                <span style={{
+                  color: timeUrgent ? "#EF4444" : timeLow ? "#F59E0B" : "#8896a6",
+                  fontFamily: "'JetBrains Mono'", fontSize: 14, fontWeight: 600,
+                  animation: timeUrgent ? "pulse 1s ease infinite" : "none",
+                }}>
+                  ⏱ {fmtTime(timeLeft || 0)}
+                </span>
+              ) : (
+                <span style={{ color: "#8896a6", fontFamily: "'JetBrains Mono'", fontSize: 13 }}>{fmtTime(elapsed)}</span>
+              )}
+              <span style={{ color: "white", fontWeight: 600, fontSize: 14 }}>Q {ci + 1}/{qs.length}</span>
+              <button onClick={end} className="btn-hover" style={{ background: "#DC2626", color: "white", padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 600, transition: "all 0.15s" }}>End</button>
+            </div>
           </div>
-          <div style={{flex:1,display:"flex",overflow:"hidden"}}>
-            <div style={{flex:1,overflow:"auto",padding:"28px 32px",borderRight:done?"1px solid #eef1f4":"none"}}>
-              <div style={{fontSize:15,lineHeight:1.8,marginBottom:28,whiteSpace:"pre-wrap"}}>{q.stem}</div>
-              <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                {choices.map(c=>{const isSel=sel===c.id;const isOk=c.id===q.correct_answer;let bc=isSel&&!done?B.accent:"#e2e7ed";let bg="white";
-                  if(done&&isOk){bg="#F0FDF4";bc="#059669";}if(done&&isSel&&!isOk){bg="#FEF2F2";bc="#DC2626";}
-                  return(<button key={c.id} onClick={()=>!done&&setSel(c.id)} style={{width:"100%",display:"flex",alignItems:"flex-start",gap:14,padding:"14px 18px",border:`2px solid ${bc}`,borderRadius:10,background:bg,cursor:done?"default":"pointer",textAlign:"left",transition:"all 0.15s"}}>
-                    <div style={{width:26,height:26,borderRadius:"50%",flexShrink:0,border:`2px solid ${done?(isOk?"#059669":isSel?"#DC2626":"#d1d5db"):(isSel?B.accent:"#d1d5db")}`,background:done?(isOk?"#059669":isSel?"#DC2626":"white"):(isSel?B.accent:"white"),display:"flex",alignItems:"center",justifyContent:"center",color:"white",fontSize:13,fontWeight:700}}>
-                      {done?(isOk?"✓":isSel?"✗":c.id):(isSel?"●":c.id)}
-                    </div><span style={{fontSize:15,lineHeight:1.6}}>{c.text}</span></button>);})}
+
+          {/* Save retry indicator */}
+          {saveQueue.length > 0 && <div style={{ background: "#FEF3C7", padding: "6px 20px", fontSize: 12, color: "#92400E", textAlign: "center" }}>
+            {saveQueue.length} answer(s) saving... will retry automatically.
+          </div>}
+
+          {/* Question area */}
+          <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflow: "auto", padding: "28px 32px", borderRight: done ? "1px solid #eef1f4" : "none" }}>
+              <div style={{ fontSize: 15, lineHeight: 1.8, marginBottom: 28, whiteSpace: "pre-wrap" }}>{q.stem}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {choices.map(c => {
+                  const isSel = sel === c.id; const isOk = c.id === q.correct_answer;
+                  let bc = isSel && !done ? B.accent : "#e2e7ed"; let bg = "white";
+                  if (done && isOk) { bg = "#F0FDF4"; bc = "#059669"; }
+                  if (done && isSel && !isOk) { bg = "#FEF2F2"; bc = "#DC2626"; }
+                  return (
+                    <button key={c.id} onClick={() => !done && setSel(c.id)} style={{ width: "100%", display: "flex", alignItems: "flex-start", gap: 14, padding: "14px 18px", border: `2px solid ${bc}`, borderRadius: 10, background: bg, cursor: done ? "default" : "pointer", textAlign: "left", transition: "all 0.15s" }}>
+                      <div style={{ width: 26, height: 26, borderRadius: "50%", flexShrink: 0, border: `2px solid ${done ? (isOk ? "#059669" : isSel ? "#DC2626" : "#d1d5db") : (isSel ? B.accent : "#d1d5db")}`, background: done ? (isOk ? "#059669" : isSel ? "#DC2626" : "white") : (isSel ? B.accent : "white"), display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontSize: 13, fontWeight: 700 }}>
+                        {done ? (isOk ? "✓" : isSel ? "✗" : c.id) : (isSel ? "●" : c.id)}
+                      </div>
+                      <span style={{ fontSize: 15, lineHeight: 1.6 }}>{c.text}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
-            {done&&config.mode==="tutor" && <div style={{flex:1,overflow:"auto",padding:"28px 32px",background:"#FAFBFC"}}>
-              <div style={{padding:"14px 18px",borderRadius:10,marginBottom:20,background:ans?.correct?"#F0FDF4":"#FEF2F2",border:`1px solid ${ans?.correct?"#BBF7D0":"#FECACA"}`}}>
-                <span style={{fontWeight:700,fontSize:15,color:ans?.correct?"#166534":"#991B1B"}}>{ans?.correct?"✅ Correct!":"❌ Incorrect — answer is "+q.correct_answer}</span></div>
-              {q.educational_objective && <div style={{padding:"14px 18px",background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:10,marginBottom:20}}>
-                <div style={{fontSize:11,fontWeight:700,color:"#1E40AF",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Educational Objective</div>
-                <div style={{fontSize:14,color:"#1E3A5F",lineHeight:1.6}}>{q.educational_objective}</div></div>}
-              {q.rationale && <div style={{marginBottom:24}}><h3 style={{fontSize:15,fontWeight:700,marginBottom:10}}>Explanation</h3><div style={{fontSize:14,lineHeight:1.8,color:"#374151",whiteSpace:"pre-wrap"}}>{q.rationale}</div></div>}
-              <div style={{marginBottom:24}}><h3 style={{fontSize:15,fontWeight:700,marginBottom:10}}>Answer Choices</h3>
-                {choices.map(c=>{const isOk=c.id===q.correct_answer;const exp=getExp(c.id);return(
-                  <div key={c.id} style={{padding:"12px 14px",marginBottom:6,borderRadius:8,border:`1px solid ${isOk?"#BBF7D0":"#e2e7ed"}`,background:isOk?"#F0FDF4":"white"}}>
-                    <div style={{fontWeight:600,fontSize:14,marginBottom:exp?6:0}}><span style={{color:isOk?"#059669":"#6B7280",marginRight:6}}>{c.id}.</span>{c.text}</div>
-                    {exp && <div style={{fontSize:13,color:"#4B5563",lineHeight:1.6,paddingLeft:20}}>{exp}</div>}</div>);})}
+
+            {/* Explanation panel (tutor + adaptive modes) */}
+            {done && (config.mode === "tutor" || config.mode === "adaptive") && (
+              <div style={{ flex: 1, overflow: "auto", padding: "28px 32px", background: "#FAFBFC" }}>
+                <div style={{ padding: "14px 18px", borderRadius: 10, marginBottom: 20, background: ans?.correct ? "#F0FDF4" : "#FEF2F2", border: `1px solid ${ans?.correct ? "#BBF7D0" : "#FECACA"}` }}>
+                  <span style={{ fontWeight: 700, fontSize: 15, color: ans?.correct ? "#166534" : "#991B1B" }}>{ans?.correct ? "✅ Correct!" : "❌ Incorrect — answer is " + q.correct_answer}</span>
+                </div>
+                {q.educational_objective && <div style={{ padding: "14px 18px", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 10, marginBottom: 20 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#1E40AF", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Educational Objective</div>
+                  <div style={{ fontSize: 14, color: "#1E3A5F", lineHeight: 1.6 }}>{q.educational_objective}</div></div>}
+                {q.rationale && <div style={{ marginBottom: 24 }}><h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Explanation</h3><div style={{ fontSize: 14, lineHeight: 1.8, color: "#374151", whiteSpace: "pre-wrap" }}>{q.rationale}</div></div>}
+                <div style={{ marginBottom: 24 }}><h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Answer Choices</h3>
+                  {choices.map(c => { const isOk = c.id === q.correct_answer; const exp = getExp(c.id); return (
+                    <div key={c.id} style={{ padding: "12px 14px", marginBottom: 6, borderRadius: 8, border: `1px solid ${isOk ? "#BBF7D0" : "#e2e7ed"}`, background: isOk ? "#F0FDF4" : "white" }}>
+                      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: exp ? 6 : 0 }}><span style={{ color: isOk ? "#059669" : "#6B7280", marginRight: 6 }}>{c.id}.</span>{c.text}</div>
+                      {exp && <div style={{ fontSize: 13, color: "#4B5563", lineHeight: 1.6, paddingLeft: 20 }}>{exp}</div>}</div>); })}
+                </div>
+                {q.references_text && <div style={{ padding: "10px 14px", background: "#F9FAFB", border: "1px solid #e2e7ed", borderRadius: 8, fontSize: 13, color: "#6B7280" }}><strong>References:</strong> {q.references_text}</div>}
               </div>
-              {q.references_text && <div style={{padding:"10px 14px",background:"#F9FAFB",border:"1px solid #e2e7ed",borderRadius:8,fontSize:13,color:"#6B7280"}}><strong>References:</strong> {q.references_text}</div>}
-            </div>}
+            )}
           </div>
-          <div style={{height:56,background:"#FAFBFC",borderTop:"1px solid #eef1f4",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 24px",flexShrink:0}}>
-            <button onClick={prev} disabled={ci===0} style={{padding:"10px 20px",background:"white",border:"1px solid #e2e7ed",borderRadius:8,fontSize:14,fontWeight:500,color:ci===0?"#ccc":"#5a6a7a"}}>← Previous</button>
-            <div style={{display:"flex",gap:8}}>
-              {!done&&sel && <button onClick={submit} style={{padding:"10px 28px",background:B.accent,color:"white",borderRadius:8,fontSize:14,fontWeight:700}}>Submit</button>}
-              {done && <button onClick={ci<qs.length-1?next:end} style={{padding:"10px 28px",background:B.accent,color:"white",borderRadius:8,fontSize:14,fontWeight:700}}>{ci<qs.length-1?"Next →":"Finish ✓"}</button>}
+
+          {/* Bottom nav */}
+          <div style={{ height: 56, background: "#FAFBFC", borderTop: "1px solid #eef1f4", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", flexShrink: 0 }}>
+            <button onClick={prev} disabled={ci === 0} style={{ padding: "10px 20px", background: "white", border: "1px solid #e2e7ed", borderRadius: 8, fontSize: 14, fontWeight: 500, color: ci === 0 ? "#ccc" : "#5a6a7a", transition: "all 0.15s" }}>← Previous</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              {!done && sel && <button onClick={submit} className="btn-hover" style={{ padding: "10px 28px", background: B.accent, color: "white", borderRadius: 8, fontSize: 14, fontWeight: 700, transition: "all 0.15s" }}>Submit</button>}
+              {done && <button onClick={ci < qs.length - 1 ? next : end} className="btn-hover" style={{ padding: "10px 28px", background: B.accent, color: "white", borderRadius: 8, fontSize: 14, fontWeight: 700, transition: "all 0.15s" }}>{ci < qs.length - 1 ? "Next →" : "Finish ✓"}</button>}
             </div>
-            <span style={{fontSize:13,color:"#8896a6"}}>{ci+1}/{qs.length}</span>
+            <span style={{ fontSize: 13, color: "#8896a6" }}>{ci + 1}/{qs.length}</span>
           </div>
         </div>
       );
     }
 
     // ============================================================
-    // UPGRADE
+    // UPGRADE (unchanged)
     // ============================================================
-    function Upgrade({acc,sub,onBack}) {
+    function Upgrade({ acc, sub, onBack }) {
       return (
-        <div style={{minHeight:"100vh",background:"#F8FAFB"}}>
-          <div style={{background:"white",borderBottom:"1px solid #eef1f4",padding:"0 24px"}}>
-            <div style={{maxWidth:700,margin:"0 auto",display:"flex",alignItems:"center",height:60,gap:14}}>
-              <button onClick={onBack} style={{background:"none",fontSize:14,color:"#8896a6"}}>← Back</button>
-              <span style={{fontWeight:700,fontSize:17}}>Upgrade Your Plan</span></div></div>
-          <div style={{maxWidth:700,margin:"0 auto",padding:"40px 24px"}}>
-            <div style={{textAlign:"center",marginBottom:40}}><h1 style={{fontSize:28,fontWeight:800,marginBottom:8}}>Unlock All Questions</h1><p style={{fontSize:15,color:"#8896a6"}}>Full access to every question, domain, and study mode.</p></div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
-              {[{label:"30 Days",price:"$49",link:CONFIG.STRIPE_LINKS.monthly,pop:false},{label:"90 Days",price:"$79",link:CONFIG.STRIPE_LINKS.quarterly,pop:true},{label:"12 Months",price:"$99",link:CONFIG.STRIPE_LINKS.annual,pop:false}].map(p=>(
-                <div key={p.label} style={{background:"white",border:p.pop?`2px solid ${B.accent}`:"1px solid #eef1f4",borderRadius:16,padding:"28px 22px",textAlign:"center",position:"relative"}}>
-                  {p.pop && <div style={{position:"absolute",top:-12,left:"50%",transform:"translateX(-50%)",background:B.accent,color:"white",padding:"4px 14px",borderRadius:20,fontSize:11,fontWeight:700}}>BEST VALUE</div>}
-                  <div style={{fontSize:14,fontWeight:600,color:"#5a6a7a",marginBottom:8}}>{p.label}</div>
-                  <div style={{fontSize:36,fontWeight:800,marginBottom:4}}>{p.price}</div>
-                  <div style={{fontSize:13,color:"#8896a6",marginBottom:20}}>one-time</div>
-                  <a href={p.link} target="_blank" rel="noopener noreferrer" style={{display:"block",padding:12,background:p.pop?B.accent:"white",color:p.pop?"white":B.accent,border:`2px solid ${B.accent}`,borderRadius:10,fontSize:14,fontWeight:700,textDecoration:"none"}}>Get Access</a>
+        <div style={{ minHeight: "100vh", background: "#F8FAFB" }}>
+          <div style={{ background: "white", borderBottom: "1px solid #eef1f4", padding: "0 24px" }}>
+            <div style={{ maxWidth: 700, margin: "0 auto", display: "flex", alignItems: "center", height: 60, gap: 14 }}>
+              <button onClick={onBack} style={{ background: "none", fontSize: 14, color: "#8896a6" }}>← Back</button>
+              <span style={{ fontWeight: 700, fontSize: 17 }}>Upgrade Your Plan</span></div></div>
+          <div style={{ maxWidth: 700, margin: "0 auto", padding: "40px 24px" }}>
+            <div style={{ textAlign: "center", marginBottom: 40 }}><h1 style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Unlock All Questions</h1><p style={{ fontSize: 15, color: "#8896a6" }}>Full access to every question, domain, and study mode.</p></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+              {[{ label: "30 Days", price: "$49", link: CONFIG.STRIPE_LINKS.monthly, pop: false }, { label: "90 Days", price: "$79", link: CONFIG.STRIPE_LINKS.quarterly, pop: true }, { label: "12 Months", price: "$99", link: CONFIG.STRIPE_LINKS.annual, pop: false }].map(p => (
+                <div key={p.label} style={{ background: "white", border: p.pop ? `2px solid ${B.accent}` : "1px solid #eef1f4", borderRadius: 16, padding: "28px 22px", textAlign: "center", position: "relative" }}>
+                  {p.pop && <div style={{ position: "absolute", top: -12, left: "50%", transform: "translateX(-50%)", background: B.accent, color: "white", padding: "4px 14px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>BEST VALUE</div>}
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#5a6a7a", marginBottom: 8 }}>{p.label}</div>
+                  <div style={{ fontSize: 36, fontWeight: 800, marginBottom: 4 }}>{p.price}</div>
+                  <div style={{ fontSize: 13, color: "#8896a6", marginBottom: 20 }}>one-time</div>
+                  <a href={p.link} target="_blank" rel="noopener noreferrer" className="btn-hover" style={{ display: "block", padding: 12, background: p.pop ? B.accent : "white", color: p.pop ? "white" : B.accent, border: `2px solid ${B.accent}`, borderRadius: 10, fontSize: 14, fontWeight: 700, textDecoration: "none", transition: "all 0.15s" }}>Get Access</a>
                 </div>
               ))}
             </div>
-            <div style={{marginTop:32,textAlign:"center",fontSize:13,color:"#8896a6"}}>30-day money-back guarantee · Instant access · Secure checkout via Stripe</div>
+            <div style={{ marginTop: 32, textAlign: "center", fontSize: 13, color: "#8896a6" }}>30-day money-back guarantee · Instant access · Secure checkout via Stripe</div>
           </div>
         </div>
       );
