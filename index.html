@@ -80,7 +80,6 @@
     p, li { font-size: 1.125rem; line-height: 1.7; }
     @media(min-width:1024px) { h1 { font-size: 3.25rem; } h2 { font-size: 2.5rem; } }
 
-    /* Buttons */
     .btn { display: inline-flex; align-items: center; justify-content: center; padding: 16px 36px; font-family: var(--font-b); font-weight: 700; font-size: 1rem; line-height: 1.5; border-radius: var(--r); border: none; cursor: pointer; transition: all .2s ease; text-decoration: none; position: relative; overflow: hidden; }
     .btn::after { content: ''; position: absolute; inset: 0; background: rgba(255,255,255,0); transition: background .2s; }
     .btn:hover::after { background: rgba(255,255,255,.1); }
@@ -95,7 +94,6 @@
     .btn--white:hover { background: rgba(255,255,255,.92); }
     .btn--white::after { display: none; }
 
-    /* Header */
     .header { position: fixed; top: 0; left: 0; right: 0; z-index: 500; height: var(--header-h); background: rgba(255,255,255,.92); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid rgba(23,15,76,.06); transition: box-shadow .3s, background .3s; }
     .header.scrolled { box-shadow: 0 2px 20px rgba(23,15,76,.08); background: rgba(255,255,255,.97); }
     .header__inner { max-width: 1200px; margin: 0 auto; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; height: 100%; }
@@ -108,7 +106,6 @@
     .dnav a.active::after { content: ''; position: absolute; bottom: 2px; left: 18px; right: 18px; height: 2px; background: var(--accent); border-radius: 1px; }
     .dnav .btn { margin-left: 12px; padding: 10px 22px; font-size: .9rem; }
 
-    /* Hamburger */
     .hamburger { display: none; background: none; border: none; cursor: pointer; width: 44px; height: 44px; position: relative; z-index: 600; }
     .hamburger span { display: block; width: 24px; height: 2px; background: var(--fg); border-radius: 2px; position: absolute; left: 10px; transition: all .3s ease; }
     .hamburger span:nth-child(1) { top: 14px; }
@@ -127,7 +124,6 @@
     @media(max-width:768px) { .dnav { display: none; } .hamburger { display: block; } .header__logo { font-size: 1.25rem; } }
     .header-spacer { height: var(--header-h); }
 
-    /* Sections */
     .section { padding: 48px 0; }
     .section--lg { padding: 72px 0; }
     @media(min-width:1024px) { .section--lg { padding: 100px 0; } }
@@ -136,11 +132,9 @@
     .bg-promo { background: var(--promo-bg); color: var(--promo-fg); }
     .bg-sec { background: var(--sec-bg); color: var(--sec-fg); }
 
-    /* Reveal */
     .reveal { opacity: 0; transform: translateY(32px); transition: opacity .7s ease, transform .7s ease; }
     .reveal.visible { opacity: 1; transform: translateY(0); }
 
-    /* Hero */
     .hero { padding-top: 60px; padding-bottom: 20px; }
     .hero__badge { display: inline-flex; align-items: center; gap: 8px; background: var(--promo-bg); color: var(--promo-fg); padding: 8px 20px; border-radius: 100px; font-size: .85rem; font-weight: 600; margin-bottom: 24px; }
     .hero h1 { margin-bottom: 20px; max-width: 720px; margin-left: auto; margin-right: auto; }
@@ -154,10 +148,8 @@
     .hero__stat-val { font-family: var(--font-h); font-size: 2rem; font-weight: 700; color: var(--fg); letter-spacing: -0.02em; }
     .hero__stat-label { font-size: .85rem; color: rgba(23,15,76,.5); margin-top: 2px; }
 
-    /* Problem */
     .problem p { margin-bottom: 16px; }
 
-    /* Solution Grid */
     .solution-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px; }
     .solution-card { background: var(--bg); border: 1px solid rgba(23,15,76,.08); border-radius: 12px; padding: 28px; transition: transform .25s ease, box-shadow .25s ease; }
     .solution-card:hover { transform: translateY(-4px); box-shadow: 0 8px 32px rgba(23,15,76,.1); }
@@ -173,7 +165,6 @@
     @media(max-width:768px) { .solution-grid { grid-template-columns: 1fr; } }
     @media(min-width:769px) and (max-width:1023px) { .solution-grid { grid-template-columns: 1fr 1fr; } }
 
-    /* Domains */
     .domains-box { max-width: 700px; margin: 40px auto 0; background: var(--bg); border: 1px solid rgba(23,15,76,.08); border-radius: 16px; padding: 32px; }
     .domain-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid rgba(23,15,76,.08); }
     .domain-row:last-child { border-bottom: none; }
@@ -183,7 +174,6 @@
     .domain-pct { font-family: var(--font-h); font-weight: 700; font-size: .9rem; color: var(--accent); min-width: 36px; text-align: right; }
     @media(max-width:600px) { .domain-bar-wrap { width: 80px; } }
 
-    /* Pricing */
     .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 860px; margin: 40px auto 0; }
     .price-card { background: var(--bg); border: 1px solid rgba(23,15,76,.08); border-radius: 16px; padding: 36px 28px; text-align: center; position: relative; transition: transform .25s, box-shadow .25s; }
     .price-card:hover { transform: translateY(-4px); box-shadow: 0 8px 32px rgba(23,15,76,.1); }
@@ -198,7 +188,6 @@
     .price-card .btn { width: 100%; }
     @media(max-width:768px) { .pricing-grid { grid-template-columns: 1fr; max-width: 380px; } }
 
-    /* Testimonials */
     .test-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
     .test-card { background: var(--promo-bg); border-radius: 12px; padding: 32px; display: flex; flex-direction: column; gap: 12px; border: 1px solid rgba(68,71,124,.06); transition: transform .25s; }
     .test-card:hover { transform: translateY(-3px); }
@@ -208,25 +197,23 @@
     .test-card__role { font-size: .85rem; color: rgba(68,71,124,.55); }
     @media(max-width:768px) { .test-grid { grid-template-columns: 1fr; } }
 
-    /* Guarantee */
     .guarantee-box { background: var(--bg); border-radius: 16px; padding: 48px 40px; max-width: 720px; margin: 0 auto; box-shadow: 0 4px 24px rgba(23,15,76,.06); border: 1px solid rgba(23,15,76,.06); }
     .guarantee-box h2 { margin-bottom: 16px; }
     .guarantee-box p { margin-bottom: 12px; color: rgba(23,15,76,.7); }
     .guarantee-box .btn { margin-top: 24px; }
     @media(max-width:600px) { .guarantee-box { padding: 32px 24px; } }
 
-    /* Blog */
     .blog-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px; }
-    .blog-card { background: var(--bg); border: 1px solid rgba(23,15,76,.08); border-radius: 12px; overflow: hidden; transition: transform .25s, box-shadow .25s; }
-    .blog-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(23,15,76,.1); }
+    .blog-card { background: var(--bg); border: 1px solid rgba(23,15,76,.08); border-radius: 12px; overflow: hidden; transition: transform .25s, box-shadow .25s; display: block; color: inherit; }
+    .blog-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(23,15,76,.1); text-decoration: none; }
     .blog-img { height: 160px; background: linear-gradient(135deg, var(--promo-bg) 0%, var(--sec-bg) 100%); display: flex; align-items: center; justify-content: center; font-size: 3rem; }
     .blog-body { padding: 24px 22px; }
     .blog-tag { font-size: .75rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; font-family: var(--font-h); }
     .blog-card h3 { font-size: 1.1rem; margin-bottom: 8px; line-height: 1.4; }
     .blog-card p { font-size: .95rem; color: rgba(23,15,76,.65); line-height: 1.6; }
+    .blog-card .read-more { display: inline-block; margin-top: 12px; font-size: .9rem; font-weight: 700; color: var(--accent); }
     @media(max-width:768px) { .blog-grid { grid-template-columns: 1fr; } }
 
-    /* CTA Banner */
     .cta-banner { background: linear-gradient(135deg, var(--accent) 0%, var(--main-bg) 100%); border-radius: 16px; padding: 48px 40px; text-align: center; color: #fff; max-width: 800px; margin: 0 auto; }
     .cta-banner h2 { color: #fff; margin-bottom: 12px; }
     .cta-banner p { color: rgba(255,255,255,.8); margin-bottom: 28px; }
@@ -236,7 +223,6 @@
     .cta-banner .email-row input:focus { outline: none; border-color: rgba(255,255,255,.5); }
     @media(max-width:600px) { .cta-banner { padding: 36px 24px; } .cta-banner .email-row { flex-direction: column; } }
 
-    /* FAQ */
     .faq-item { border-bottom: 1px solid rgba(23,15,76,.1); }
     .faq-item:first-child { border-top: 1px solid rgba(23,15,76,.1); }
     .faq-q { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 20px 0; background: none; border: none; cursor: pointer; text-align: left; font-family: var(--font-b); font-weight: 700; font-size: 1.1rem; color: var(--fg); gap: 16px; transition: color .2s; }
@@ -247,7 +233,6 @@
     .faq-a__inner { padding: 0 0 20px; }
     .faq-a__inner p { color: rgba(23,15,76,.7); }
 
-    /* Footer */
     .footer { background: var(--bg); padding: 24px 0 28px; border-top: 1px solid rgba(23,15,76,.06); }
     .footer__inner { display: flex; flex-direction: column; gap: 20px; }
     .footer__top { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
@@ -259,13 +244,11 @@
     .footer__copy { font-size: .78rem; color: rgba(23,15,76,.4); text-align: center; padding-top: 16px; border-top: 1px solid rgba(23,15,76,.06); }
     @media(max-width:600px) { .footer__top { flex-direction: column; } }
 
-    /* Scroll to top */
     .scroll-top { position: fixed; right: 24px; bottom: 24px; width: 48px; height: 48px; border-radius: 50%; background: var(--fg); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 16px rgba(23,15,76,.25); opacity: 0; visibility: hidden; transition: all .3s; z-index: 100; transform: translateY(12px); }
     .scroll-top.visible { opacity: 1; visibility: visible; transform: translateY(0); }
     .scroll-top:hover { transform: translateY(-2px); box-shadow: 0 6px 24px rgba(23,15,76,.35); }
     .scroll-top svg { width: 20px; height: 20px; fill: #fff; }
 
-    /* Modal */
     .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(23,15,76,.55); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index: 1000; align-items: center; justify-content: center; padding: 24px; }
     .modal-overlay.active { display: flex; }
     .modal-box { background: #fff; border-radius: 16px; max-width: 440px; width: 100%; padding: 44px 36px; position: relative; box-shadow: 0 24px 64px rgba(23,15,76,.2); animation: modalIn .3s cubic-bezier(.34,1.56,.64,1); }
@@ -337,7 +320,7 @@
 <!-- HEADER -->
 <header class="header" id="header">
   <div class="header__inner">
-    <a href="#" class="header__logo"><span>&#128737;&#65039;</span> CHC QBank</a>
+    <a href="/" class="header__logo"><span>&#128737;&#65039;</span> CHC QBank</a>
     <nav class="dnav" id="desktopNav">
       <a href="#features">Features</a>
       <a href="#domains">Domains</a>
@@ -555,30 +538,33 @@
     <h2 class="tc reveal" style="margin-bottom:8px">CHC Exam Resources</h2>
     <p class="tc reveal" style="transition-delay:.1s;font-size:1.05rem;color:rgba(23,15,76,.6)">Free guides to help you prepare.</p>
     <div class="blog-grid">
-      <div class="blog-card reveal" style="transition-delay:.1s">
+      <a href="/blog-chc-exam-study-guide.html" class="blog-card reveal" style="transition-delay:.1s">
         <div class="blog-img">&#128203;</div>
         <div class="blog-body">
           <div class="blog-tag">Study Guide</div>
           <h3>How to Pass the CHC Exam in 2026: The Complete Study Guide</h3>
-          <p>The CHC exam tests 7 domains of healthcare compliance. With a ~65% pass rate, preparation is everything. This guide breaks down what to study and which resources work.</p>
+          <p>A 6-week study plan, 7 high-yield topics, common mistakes, and why scenario-based practice is the key to passing.</p>
+          <span class="read-more">Read guide &rarr;</span>
         </div>
-      </div>
-      <div class="blog-card reveal" style="transition-delay:.2s">
+      </a>
+      <a href="/blog-chc-vs-chpc-vs-ccep-certification.html" class="blog-card reveal" style="transition-delay:.2s">
         <div class="blog-img">&#9878;&#65039;</div>
         <div class="blog-body">
-          <div class="blog-tag">Exam Content</div>
-          <h3>CHC Exam Domains Explained: What You'll Actually Be Tested On</h3>
-          <p>The Detailed Content Outline defines exactly what HCCA tests. Here's what each domain covers and how to prioritize your study time.</p>
+          <div class="blog-tag">Certification Comparison</div>
+          <h3>CHC vs CHPC vs CCEP: Which Compliance Certification Should You Get?</h3>
+          <p>Side-by-side comparison of the three major healthcare compliance certifications. Exam content, cost, and which fits your career.</p>
+          <span class="read-more">Read comparison &rarr;</span>
         </div>
-      </div>
-      <div class="blog-card reveal" style="transition-delay:.3s">
-        <div class="blog-img">&#128273;</div>
+      </a>
+      <a href="/blog-chc-certification-salary-career-earnings.html" class="blog-card reveal" style="transition-delay:.3s">
+        <div class="blog-img">&#128176;</div>
         <div class="blog-body">
-          <div class="blog-tag">Key Regulations</div>
-          <h3>5 Laws Every CHC Candidate Must Know Cold</h3>
-          <p>Anti-Kickback Statute, Stark Law, False Claims Act, HIPAA, and the 60-Day Overpayment Rule. The exam tests whether you can apply them to real scenarios.</p>
+          <div class="blog-tag">Career &amp; Salary</div>
+          <h3>Is CHC Certification Worth It? Salary Data &amp; What Hiring Managers Think</h3>
+          <p>Real salary data, ROI breakdown, and how recruiters and hiring managers view CHC certification on your resume.</p>
+          <span class="read-more">Read analysis &rarr;</span>
         </div>
-      </div>
+      </a>
     </div>
   </div>
 </section>
@@ -646,6 +632,7 @@
         <div class="footer__links">
           <a href="#features">Features</a>
           <a href="#pricing">Pricing</a>
+          <a href="#blog">Blog</a>
           <a href="#faq">FAQ</a>
           <a href="mailto:support@chcqbank.com">Contact</a>
         </div>
@@ -662,16 +649,10 @@
 
 <script>
 (function(){
-  // ============================================================
-  // SUPABASE CONFIG
-  // ============================================================
   var SUPABASE_URL = "https://mjomlxbafjfmjniltluh.supabase.co";
   var SUPABASE_KEY = "sb_publishable_t6YuUYq4TYn3q0DfAXNF_Q_N1LmeaU3";
   var APP_URL = "https://certvault-qbanks.github.io/CHC-QBank/app/";
 
-  // ============================================================
-  // REVEAL ANIMATIONS
-  // ============================================================
   var revealEls = document.querySelectorAll('.reveal');
   var obs = new IntersectionObserver(function(entries){
     entries.forEach(function(e){
@@ -685,23 +666,14 @@
   },{threshold:0.12,rootMargin:'0px 0px -40px 0px'});
   revealEls.forEach(function(el){obs.observe(el)});
 
-  // ============================================================
-  // HEADER SCROLL
-  // ============================================================
   var header = document.getElementById('header');
   window.addEventListener('scroll',function(){header.classList.toggle('scrolled',window.scrollY>10)},{passive:true});
 
-  // ============================================================
-  // NAV ACTIVE STATE
-  // ============================================================
   var sections = document.querySelectorAll('section[id]');
   var navLinks = document.querySelectorAll('.dnav a[href^="#"],.mobile-drawer a[href^="#"]');
   function updateNav(){var c='';sections.forEach(function(s){if(window.scrollY>=s.offsetTop-120)c=s.getAttribute('id')});navLinks.forEach(function(l){l.classList.toggle('active',l.getAttribute('href')==='#'+c)})}
   window.addEventListener('scroll',updateNav,{passive:true});updateNav();
 
-  // ============================================================
-  // HAMBURGER / MOBILE DRAWER
-  // ============================================================
   var hamburger = document.getElementById('hamburger');
   var drawer = document.getElementById('mobileDrawer');
   var overlay = document.getElementById('drawerOverlay');
@@ -711,9 +683,6 @@
   overlay.addEventListener('click',closeD);
   drawer.querySelectorAll('a').forEach(function(a){a.addEventListener('click',closeD)});
 
-  // ============================================================
-  // AUTH MODAL
-  // ============================================================
   var modal = document.getElementById('authModal');
   var modalClose = document.getElementById('modalClose');
 
@@ -745,9 +714,6 @@
   modal.addEventListener('click',function(e){if(e.target===modal)closeModal()});
   document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal()});
 
-  // ============================================================
-  // SIGNUP / LOGIN
-  // ============================================================
   window.handleSignup = async function(){
     var name = document.getElementById('signup-name').value;
     var email = document.getElementById('signup-email').value;
@@ -780,9 +746,6 @@
     }catch(err){errEl.textContent=err.message;errEl.style.display='block'}
   };
 
-  // ============================================================
-  // EMAIL CAPTURE
-  // ============================================================
   window.submitEmail = function(){
     var el = document.getElementById('ml-email');
     if(!el.value)return;
@@ -790,9 +753,6 @@
     el.placeholder='\u2713 Subscribed! Check your inbox.';
   };
 
-  // ============================================================
-  // FAQ ACCORDION
-  // ============================================================
   document.querySelectorAll('.faq-q').forEach(function(btn){
     btn.addEventListener('click',function(){
       var a=btn.nextElementSibling;var open=btn.classList.contains('active');
@@ -801,9 +761,6 @@
     });
   });
 
-  // ============================================================
-  // SCROLL TO TOP
-  // ============================================================
   var stb = document.getElementById('scrollTopBtn');
   window.addEventListener('scroll',function(){stb.classList.toggle('visible',window.scrollY>500)},{passive:true});
   stb.addEventListener('click',function(){window.scrollTo({top:0,behavior:'smooth'})});
