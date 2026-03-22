@@ -15,14 +15,14 @@
     ::-webkit-scrollbar-thumb{background:#CCC;border-radius:3px}
     button{cursor:pointer;border:none;font-family:inherit;font-size:13px}
     button:disabled{cursor:default;opacity:.4}
-    input{outline:none;font-family:inherit}
+    input,select{outline:none;font-family:inherit}
     @keyframes fadeIn{from{opacity:0}to{opacity:1}}
     @keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
     .fi{animation:fadeIn .3s ease}.su{animation:slideUp .35s ease}
-    .q-stem ::selection{background:#FFEB3B88}
     .choice-struck .choice-text{text-decoration:line-through;color:#8B92A0}
+    .chk{width:16px;height:16px;accent-color:#0E7669;cursor:pointer}
   </style>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -31,8 +31,9 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const{useState,useEffect,useRef,useMemo}=React;
+const{useState,useEffect,useRef,useMemo,useCallback}=React;
 
+// === THEME ===
 const T={
   chrome:"#1B2332",chromeLight:"#263044",chromeBorder:"#344054",
   chromeText:"#C8D0DA",chromeTextBright:"#F1F3F6",
@@ -53,8 +54,7 @@ const CONFIG={
   SUPABASE_ANON_KEY:"sb_publishable_t6YuUYq4TYn3q0DfAXNF_Q_N1LmeaU3",
   CERT:"chc",
   STRIPE:{monthly:"https://buy.stripe.com/fZu28r20y7dbdpjdGa4ZG07",quarterly:"https://buy.stripe.com/fZucN57kS7db70V8lQ4ZG08",annual:"https://buy.stripe.com/bJe4gzgVs8hf0CxcC64ZG09"},
-  FREE_LIMIT:50,
-  SEC_PER_Q:72,
+  FREE_LIMIT:50,SEC_PER_Q:72,
 };
 
 // === SUPABASE ===
@@ -68,9 +68,9 @@ class SB{
   async signIn(e,p){const r=await fetch(this.url+"/auth/v1/token?grant_type=password",{method:"POST",headers:{"Content-Type":"application/json",apikey:this.key},body:JSON.stringify({email:e,password:p})});const d=await r.json();if(d.error||d.error_description)throw new Error(d.error_description||d.error);this.at=d.access_token;this.rt=d.refresh_token;this.user=d.user;this._save();return d;}
   async signOut(){try{await fetch(this.url+"/auth/v1/logout",{method:"POST",headers:this._h()});}catch{}this.at=null;this.rt=null;this.user=null;this._save();}
   async refresh(){if(!this.rt)return;try{const r=await fetch(this.url+"/auth/v1/token?grant_type=refresh_token",{method:"POST",headers:{"Content-Type":"application/json",apikey:this.key},body:JSON.stringify({refresh_token:this.rt})});const d=await r.json();if(d.access_token){this.at=d.access_token;this.rt=d.refresh_token;this.user=d.user;this._save();}}catch{}}
-  async q(table,{select="*",filters=[],single=false,upsert=false,body=null,method="GET"}={}){
-    let u=this.url+"/rest/v1/"+table+"?select="+select;filters.forEach(f=>u+="&"+f);
-    const o={method,headers:{...this._h(),Prefer:upsert?"resolution=merge-duplicates,return=representation":method==="POST"?"return=representation":"return=representation"}};
+  async q(table,{select="*",filters=[],single=false,upsert=false,body=null,method="GET",order=null}={}){
+    let u=this.url+"/rest/v1/"+table+"?select="+select;filters.forEach(f=>u+="&"+f);if(order)u+="&order="+order;
+    const o={method,headers:{...this._h(),Prefer:upsert?"resolution=merge-duplicates,return=representation":method==="POST"||method==="PATCH"?"return=representation":"return=representation"}};
     if(body)o.body=JSON.stringify(body);
     const r=await fetch(u,o);if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.message||r.status);}
     const d=await r.json();return single&&Array.isArray(d)?d[0]||null:d;
@@ -78,19 +78,21 @@ class SB{
   getSub(c){const u=this.getUser();if(!u)return Promise.resolve(null);return this.q("user_subscriptions",{filters:["user_id=eq."+u.id,"certification_id=eq."+c,"status=eq.active"],single:true});}
   createTrial(c){const u=this.getUser();if(!u)return;return this.q("user_subscriptions",{method:"POST",upsert:true,body:{user_id:u.id,certification_id:c,plan:"free_trial",status:"active",trial_ends_at:new Date(Date.now()+7*864e5).toISOString()}});}
   getQuestions(c){return this.q("questions",{filters:["certification_id=eq."+c,"is_active=eq.true","limit=1000"]});}
-  getDomains(c){return this.q("exam_domains",{filters:["certification_id=eq."+c,"order=sort_order.asc"]});}
+  getDomains(c){return this.q("exam_domains",{filters:["certification_id=eq."+c],order:"sort_order.asc"});}
   getProgress(c){const u=this.getUser();if(!u)return Promise.resolve([]);return this.q("user_question_progress",{filters:["user_id=eq."+u.id,"certification_id=eq."+c]});}
   saveProgress(p){return this.q("user_question_progress",{method:"POST",body:p});}
+  // Session methods
+  getSessions(c){const u=this.getUser();if(!u)return Promise.resolve([]);return this.q("test_sessions",{filters:["user_id=eq."+u.id,"certification_id=eq."+c],order:"updated_at.desc"});}
+  createSession(s){return this.q("test_sessions",{method:"POST",body:s,single:true});}
+  updateSession(id,data){return this.q("test_sessions",{method:"PATCH",filters:["id=eq."+id],body:data,single:true});}
 }
 const sb=new SB(CONFIG.SUPABASE_URL,CONFIG.SUPABASE_ANON_KEY);
 
 // === UTILS ===
 function shuffle(a){const b=[...a];for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];}return b;}
-function adaptiveQueue(qs,prog){
-  const hm={};prog.forEach(p=>{(hm[p.question_id]=hm[p.question_id]||[]).push(p);});
-  return qs.map(q=>{const h=hm[q.id]||[];if(!h.length)return{q,box:1,ls:0};h.sort((a,b)=>new Date(b.created_at||0)-new Date(a.created_at||0));const r=h.slice(0,5);const ci=r.findIndex(x=>!x.is_correct);const s=ci===-1?r.length:ci;const box=r[0]&&!r[0].is_correct?1:Math.min(5,s+1);return{q,box,ls:new Date(r[0]?.created_at||0).getTime()};}).sort((a,b)=>a.box!==b.box?a.box-b.box:a.ls-b.ls).map(s=>s.q);
-}
+function adaptiveQueue(qs,prog){const hm={};prog.forEach(p=>{(hm[p.question_id]=hm[p.question_id]||[]).push(p);});return qs.map(q=>{const h=hm[q.id]||[];if(!h.length)return{q,box:1,ls:0};h.sort((a,b)=>new Date(b.created_at||0)-new Date(a.created_at||0));const r=h.slice(0,5);const ci=r.findIndex(x=>!x.is_correct);const s=ci===-1?r.length:ci;const box=r[0]&&!r[0].is_correct?1:Math.min(5,s+1);return{q,box,ls:new Date(r[0]?.created_at||0).getTime()};}).sort((a,b)=>a.box!==b.box?a.box-b.box:a.ls-b.ls).map(s=>s.q);}
 function fmt(s){if(s<0)s=0;const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sc=s%60;return h>0?h+":"+String(m).padStart(2,"0")+":"+String(sc).padStart(2,"0"):m+":"+String(sc).padStart(2,"0");}
+function relTime(d){const ms=Date.now()-new Date(d).getTime();const m=Math.floor(ms/6e4),h=Math.floor(ms/36e5),dy=Math.floor(ms/864e5);if(m<1)return"just now";if(m<60)return m+"m ago";if(h<24)return h+"h ago";if(dy<30)return dy+"d ago";return new Date(d).toLocaleDateString();}
 
 // === ICONS ===
 const Ic={
@@ -103,6 +105,8 @@ const Ic={
   arrL:(c)=><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c||"currentColor"} strokeWidth="1.5" strokeLinecap="round"><path d="M9 2L4 7l5 5"/></svg>,
   arrR:(c)=><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c||"currentColor"} strokeWidth="1.5" strokeLinecap="round"><path d="M5 2l5 5-5 5"/></svg>,
   logout:(c)=><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke={c||"currentColor"} strokeWidth="1.5"><path d="M6 2H4a2 2 0 00-2 2v8a2 2 0 002 2h2M10.5 11.5L14 8l-3.5-3.5M14 8H6"/></svg>,
+  play:(c)=><svg width="14" height="14" viewBox="0 0 14 14" fill={c||"currentColor"}><path d="M3 1.5v11l9-5.5z"/></svg>,
+  history:(c)=><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke={c||"currentColor"} strokeWidth="1.5"><path d="M1 3v4h4"/><path d="M1 7a7 7 0 1113 3.5"/><path d="M8 4v4l2.5 1.5"/></svg>,
 };
 
 // === APP ===
@@ -114,6 +118,7 @@ function App(){
   const[questions,setQuestions]=useState([]);
   const[domains,setDomains]=useState([]);
   const[progress,setProgress]=useState([]);
+  const[sessions,setSessions]=useState([]);
   const[quizCfg,setQuizCfg]=useState(null);
   const[error,setError]=useState(null);
   const[toast,setToast]=useState(null);
@@ -129,8 +134,8 @@ function App(){
       let s=await sb.getSub(CONFIG.CERT);
       if(!s){await sb.createTrial(CONFIG.CERT);s=await sb.getSub(CONFIG.CERT);}
       setSub(s);
-      const[d,q,pr]=await Promise.all([sb.getDomains(CONFIG.CERT),sb.getQuestions(CONFIG.CERT),sb.getProgress(CONFIG.CERT)]);
-      setDomains(Array.isArray(d)?d:[]);setQuestions(Array.isArray(q)?q:[]);setProgress(Array.isArray(pr)?pr:[]);
+      const[d,q,pr,sess]=await Promise.all([sb.getDomains(CONFIG.CERT),sb.getQuestions(CONFIG.CERT),sb.getProgress(CONFIG.CERT),sb.getSessions(CONFIG.CERT)]);
+      setDomains(Array.isArray(d)?d:[]);setQuestions(Array.isArray(q)?q:[]);setProgress(Array.isArray(pr)?pr:[]);setSessions(Array.isArray(sess)?sess:[]);
       setScreen("dashboard");
     }catch(e){console.error(e);setScreen("dashboard");}
   }
@@ -149,7 +154,9 @@ function App(){
       {toast&&<div className="fi" style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:9999,display:"flex",alignItems:"center",gap:10,padding:"10px 18px",borderRadius:T.r,background:toast.t==="ok"?T.correct:T.incorrect,color:"#fff",fontSize:13,fontWeight:600,boxShadow:"0 8px 24px rgba(0,0,0,.2)"}}>{toast.m}<button onClick={()=>setToast(null)} style={{background:"none",color:"#fff",padding:0,marginLeft:6}}>{Ic.x("#fff",12)}</button></div>}
       {screen==="auth"&&<Auth mode={authMode} setMode={setAuthMode} error={error} onAuth={async(e,p,n)=>{try{setError(null);if(authMode==="signup")await sb.signUp(e,p,n);else await sb.signIn(e,p);setUser(sb.getUser());loadData();showToast(authMode==="signup"?"Account created":"Welcome back");}catch(er){setError(er.message);}}}/>}
       {screen==="loading"&&<div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}><div style={{width:32,height:32,border:"3px solid "+T.border,borderTopColor:T.accent,borderRadius:"50%",animation:"spin .7s linear infinite"}}/><span style={{fontSize:13,color:T.textMuted}}>Loading...</span></div>}
-      {screen==="dashboard"&&<Dash user={user} acc={acc} sub={sub} questions={questions} availQ={availQ} domains={domains} progress={progress} onQuiz={c=>{setQuizCfg(c);setScreen("quiz");}} onNav={setScreen} onLogout={()=>{sb.signOut();setUser(null);setScreen("auth");}} showToast={showToast}/>}
+      {screen==="dashboard"&&<Dashboard user={user} acc={acc} sub={sub} questions={questions} availQ={availQ} domains={domains} progress={progress} sessions={sessions} onQuiz={c=>{setQuizCfg(c);setScreen("quiz");}} onNav={setScreen} onLogout={()=>{sb.signOut();setUser(null);setScreen("auth");}} showToast={showToast}/>}
+      {screen==="create"&&<CreateTest availQ={availQ} domains={domains} progress={progress} sessions={sessions} onStart={c=>{setQuizCfg(c);setScreen("quiz");}} onBack={()=>setScreen("dashboard")} showToast={showToast}/>}
+      {screen==="history"&&<History sessions={sessions} questions={questions} domains={domains} progress={progress} onReview={c=>{setQuizCfg(c);setScreen("quiz");}} onBack={()=>setScreen("dashboard")}/>}
       {screen==="quiz"&&quizCfg&&<Quiz config={quizCfg} onExit={()=>{loadData();setScreen("dashboard");}} showToast={showToast}/>}
       {screen==="upgrade"&&<Upgrade onBack={()=>setScreen("dashboard")}/>}
     </div>
@@ -166,9 +173,9 @@ function Auth({mode,setMode,error,onAuth}){
     <div style={{minHeight:"100vh",display:"flex",background:T.chrome}}>
       <div style={{flex:"0 0 400px",display:"flex",flexDirection:"column",justifyContent:"center",padding:"60px 44px",background:"linear-gradient(180deg,#0E7669,#0A5A4F)"}}>
         <div style={{fontSize:36,marginBottom:14}}>🛡️</div>
-        <h1 style={{fontSize:26,fontWeight:700,color:"#fff",marginBottom:8,lineHeight:1.2}}>CHC QBank</h1>
-        <p style={{fontSize:14,color:"rgba(255,255,255,.65)",lineHeight:1.7,marginBottom:28}}>Certified in Healthcare Compliance exam preparation. Realistic questions, detailed rationales, and adaptive review.</p>
-        {["Exam-style questions with rationales","Timed exam simulation","Spaced repetition review","Domain-by-domain analytics"].map((t,i)=>(
+        <h1 style={{fontSize:26,fontWeight:700,color:"#fff",marginBottom:8}}>CHC QBank</h1>
+        <p style={{fontSize:14,color:"rgba(255,255,255,.65)",lineHeight:1.7,marginBottom:28}}>Certified in Healthcare Compliance exam prep with realistic questions, detailed rationales, and adaptive review.</p>
+        {["Exam-style questions with rationales","Timed exam simulation","Spaced repetition review","Track & review past tests"].map((t,i)=>(
           <div key={i} style={{display:"flex",alignItems:"center",gap:8,color:"rgba(255,255,255,.8)",fontSize:13,marginBottom:10}}>
             <div style={{width:18,height:18,borderRadius:"50%",background:"rgba(255,255,255,.15)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{Ic.check("#fff",10)}</div>{t}
           </div>
@@ -180,17 +187,33 @@ function Auth({mode,setMode,error,onAuth}){
           <p style={{fontSize:13,color:T.chromeText,marginBottom:28}}>{mode==="login"?"Enter your credentials":"Start your 7-day free trial"}</p>
           {error&&<div style={{padding:"10px 12px",background:T.incorrectBg,border:"1px solid "+T.incorrectBorder,borderRadius:T.r,fontSize:13,color:T.incorrect,marginBottom:16}}>{error}</div>}
           {mode==="signup"&&<><label style={lbl}>Full Name</label><input value={name} onChange={e=>setName(e.target.value)} placeholder="Jane Doe" style={{...inp,marginBottom:14}}/></>}
-          <label style={lbl}>Email</label>
-          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" style={{...inp,marginBottom:14}}/>
-          <label style={lbl}>Password</label>
-          <input type="password" value={pass} onChange={e=>setPass(e.target.value)} placeholder="8+ characters" onKeyDown={e=>{if(e.key==="Enter")go();}} style={inp}/>
-          <button onClick={go} disabled={loading} style={{width:"100%",padding:12,background:T.accent,color:"#fff",borderRadius:T.r,fontSize:14,fontWeight:600,marginTop:20,transition:"background .15s"}} onMouseEnter={e=>e.currentTarget.style.background=T.accentHover} onMouseLeave={e=>e.currentTarget.style.background=T.accent}>
-            {loading?"...":(mode==="login"?"Sign In":"Create Account")}
-          </button>
-          <p style={{fontSize:13,color:T.chromeText,textAlign:"center",marginTop:20}}>
-            {mode==="login"?"No account? ":"Have an account? "}
-            <span style={{color:T.accent,fontWeight:600,cursor:"pointer"}} onClick={()=>setMode(mode==="login"?"signup":"login")}>{mode==="login"?"Sign up":"Sign in"}</span>
-          </p>
+          <label style={lbl}>Email</label><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" style={{...inp,marginBottom:14}}/>
+          <label style={lbl}>Password</label><input type="password" value={pass} onChange={e=>setPass(e.target.value)} placeholder="8+ characters" onKeyDown={e=>{if(e.key==="Enter")go();}} style={inp}/>
+          <button onClick={go} disabled={loading} style={{width:"100%",padding:12,background:T.accent,color:"#fff",borderRadius:T.r,fontSize:14,fontWeight:600,marginTop:20}}>{loading?"...":(mode==="login"?"Sign In":"Create Account")}</button>
+          <p style={{fontSize:13,color:T.chromeText,textAlign:"center",marginTop:20}}>{mode==="login"?"No account? ":"Have an account? "}<span style={{color:T.accent,fontWeight:600,cursor:"pointer"}} onClick={()=>setMode(mode==="login"?"signup":"login")}>{mode==="login"?"Sign up":"Sign in"}</span></p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// === TOP NAV (shared) ===
+function TopNav({user,acc,sub,onNav,onLogout}){
+  const fn=user?.user_metadata?.full_name?.split(" ")[0]||"";
+  const daysLeft=sub?.plan==="free_trial"?Math.max(0,Math.ceil((new Date(sub.trial_ends_at)-Date.now())/864e5)):null;
+  return(
+    <div style={{background:T.chrome,borderBottom:"1px solid "+T.chromeBorder}}>
+      <div style={{maxWidth:1100,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center",height:48,padding:"0 24px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:18}}>🛡️</span>
+          <span style={{fontWeight:700,fontSize:15,color:T.chromeTextBright,cursor:"pointer"}} onClick={()=>onNav("dashboard")}>CHC QBank</span>
+          {acc==="trial"&&daysLeft!==null&&<span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:10,background:"rgba(14,118,105,.25)",color:"#5EEAD4",marginLeft:8}}>TRIAL · {daysLeft}d</span>}
+          {acc==="full"&&<span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:10,background:"rgba(26,127,55,.2)",color:"#86EFAC",marginLeft:8}}>PRO</span>}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:14}}>
+          {acc!=="full"&&<button onClick={()=>onNav("upgrade")} style={{padding:"6px 14px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:600,fontSize:12}}>Upgrade</button>}
+          <span style={{fontSize:13,color:T.chromeText}}>{fn||user?.email}</span>
+          <button onClick={onLogout} style={{background:"none",color:T.chromeText,padding:4,display:"flex"}}>{Ic.logout(T.chromeText)}</button>
         </div>
       </div>
     </div>
@@ -198,144 +221,356 @@ function Auth({mode,setMode,error,onAuth}){
 }
 
 // === DASHBOARD ===
-function Dash({user,acc,sub,questions,availQ,domains,progress,onQuiz,onNav,onLogout,showToast}){
-  const totalQ=questions.length;
-  const daysLeft=sub?.plan==="free_trial"?Math.max(0,Math.ceil((new Date(sub.trial_ends_at)-Date.now())/864e5)):null;
+function Dashboard({user,acc,sub,questions,availQ,domains,progress,sessions,onQuiz,onNav,onLogout,showToast}){
   const attempted=new Set(progress.map(p=>p.question_id)).size;
-  const correctAll=progress.filter(p=>p.is_correct).length;
   const totalA=progress.length;
-  const accuracy=totalA>0?Math.round(correctAll/totalA*100):0;
+  const accuracy=totalA>0?Math.round(progress.filter(p=>p.is_correct).length/totalA*100):0;
   const latestByQ={};progress.forEach(p=>{const x=latestByQ[p.question_id];if(!x||new Date(p.created_at||0)>new Date(x.created_at||0))latestByQ[p.question_id]=p;});
   const weakCount=Object.values(latestByQ).filter(p=>!p.is_correct).length;
-  const domainStats=domains.map(d=>{const dqs=questions.filter(q=>q.domain_id===d.id);const dp=progress.filter(p=>dqs.some(q=>q.id===p.question_id));const dc=dp.filter(p=>p.is_correct).length;return{...d,qc:dqs.length,att:new Set(dp.map(p=>p.question_id)).size,acc:dp.length>0?Math.round(dc/dp.length*100):null};});
-  const startQuiz=mode=>{if(!availQ.length){showToast("No questions available","err");return;}onQuiz({mode,questions:mode==="adaptive"?adaptiveQueue(availQ,progress):shuffle(availQ)});};
-  const fn=user?.user_metadata?.full_name?.split(" ")[0]||"";
+  const inProgress=sessions.filter(s=>s.status==="in_progress");
+  const recent=sessions.filter(s=>s.status==="completed").slice(0,5);
 
   return(
     <div style={{minHeight:"100vh",background:T.bg}}>
-      {/* Nav */}
-      <div style={{background:T.chrome,borderBottom:"1px solid "+T.chromeBorder}}>
-        <div style={{maxWidth:1100,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center",height:48,padding:"0 24px"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:18}}>🛡️</span>
-            <span style={{fontWeight:700,fontSize:15,color:T.chromeTextBright}}>CHC QBank</span>
-            {acc==="trial"&&daysLeft!==null&&<span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:10,background:"rgba(14,118,105,.25)",color:"#5EEAD4",marginLeft:8}}>TRIAL · {daysLeft}d</span>}
-            {acc==="full"&&<span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:10,background:"rgba(26,127,55,.2)",color:"#86EFAC",marginLeft:8}}>PRO</span>}
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:14}}>
-            {acc!=="full"&&<button onClick={()=>onNav("upgrade")} style={{padding:"6px 14px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:600,fontSize:12}}>Upgrade</button>}
-            <span style={{fontSize:13,color:T.chromeText}}>{fn||user?.email}</span>
-            <button onClick={onLogout} style={{background:"none",color:T.chromeText,padding:4,display:"flex"}}>{Ic.logout(T.chromeText)}</button>
-          </div>
-        </div>
-      </div>
-
+      <TopNav user={user} acc={acc} sub={sub} onNav={onNav} onLogout={onLogout}/>
       <div style={{maxWidth:1100,margin:"0 auto",padding:"28px 24px"}}>
         {acc==="expired"&&<div className="su" style={{background:T.incorrectBg,border:"1px solid "+T.incorrectBorder,borderRadius:T.rLg,padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-          <span style={{fontSize:13,fontWeight:600,color:T.incorrect}}>Your {sub?.plan==="free_trial"?"free trial":"subscription"} has expired</span>
+          <span style={{fontSize:13,fontWeight:600,color:T.incorrect}}>Your {sub?.plan==="free_trial"?"trial":"subscription"} expired</span>
           <button onClick={()=>onNav("upgrade")} style={{padding:"6px 16px",background:T.incorrect,color:"#fff",borderRadius:T.r,fontWeight:600,fontSize:12}}>Upgrade</button>
         </div>}
 
-        {/* Study Modes */}
-        <div style={{marginBottom:28}}>
-          <h2 style={{fontSize:13,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:14}}>Study Modes</h2>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
-            {[
-              {mode:"tutor",title:"Tutor Mode",desc:"See explanation after each question",meta:"RECOMMENDED",mc:T.accent,mb:T.accentBg,ib:T.accentBg,ic:T.accent},
-              {mode:"timed",title:"Timed Exam",desc:CONFIG.SEC_PER_Q+"s per question · auto-submit",meta:"EXAM SIM",mc:T.warning,mb:T.warningBg,ib:T.warningBg,ic:T.warning},
-              {mode:"adaptive",title:"Adaptive Review",desc:weakCount>0?weakCount+" questions need review":"Prioritizes unseen & weak areas",meta:"SPACED REP",mc:T.infoText,mb:T.infoBg,ib:T.infoBg,ic:T.infoText},
-            ].map(m=>(
-              <button key={m.mode} onClick={()=>startQuiz(m.mode)} style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,padding:20,textAlign:"left",transition:"all .15s"}}
-                onMouseEnter={e=>{e.currentTarget.style.borderColor=T.accentBorder;e.currentTarget.style.boxShadow="0 2px 12px rgba(0,0,0,.05)";}}
-                onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border;e.currentTarget.style.boxShadow="none";}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                  <div style={{width:36,height:36,borderRadius:T.r,background:m.ib,display:"flex",alignItems:"center",justifyContent:"center"}}>{Ic.check(m.ic,18)}</div>
-                  <span style={{fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:10,background:m.mb,color:m.mc,letterSpacing:".04em"}}>{m.meta}</span>
+        {/* In-progress sessions */}
+        {inProgress.length>0&&<div style={{marginBottom:24}}>
+          <h2 style={{fontSize:13,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:12}}>Resume In Progress</h2>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {inProgress.map(s=>(
+              <div key={s.id} style={{background:T.surface,border:"1px solid "+T.accentBorder,borderRadius:T.rLg,padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <span style={{fontWeight:600,fontSize:14}}>{s.mode==="tutor"?"Tutor":s.mode==="timed"?"Timed Exam":"Adaptive"}</span>
+                  <span style={{color:T.textMuted,fontSize:13,marginLeft:12}}>{s.answered_count}/{s.total_questions} answered · {relTime(s.updated_at)}</span>
                 </div>
-                <div style={{fontSize:15,fontWeight:700,marginBottom:3}}>{m.title}</div>
-                <div style={{fontSize:13,color:T.textSecondary,lineHeight:1.5}}>{m.desc}</div>
-                <div style={{marginTop:12,fontSize:12,color:T.textMuted}}>{availQ.length} questions</div>
-              </button>
+                <button onClick={()=>onQuiz({sessionId:s.id,mode:s.mode,questionIds:s.question_ids,resumeIndex:s.current_index,flaggedIndices:s.flagged_indices||[],isResume:true})} style={{padding:"7px 16px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>{Ic.play("#fff")} Resume</button>
+              </div>
             ))}
           </div>
+        </div>}
+
+        {/* Action buttons */}
+        <div style={{display:"flex",gap:12,marginBottom:28}}>
+          <button onClick={()=>onNav("create")} style={{flex:1,padding:"18px 20px",background:T.accent,color:"#fff",borderRadius:T.rLg,fontSize:15,fontWeight:700,textAlign:"center",transition:"background .15s"}} onMouseEnter={e=>e.currentTarget.style.background=T.accentHover} onMouseLeave={e=>e.currentTarget.style.background=T.accent}>
+            + Create New Test
+          </button>
+          <button onClick={()=>onNav("history")} style={{padding:"18px 24px",background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,fontSize:14,fontWeight:600,color:T.textSecondary,display:"flex",alignItems:"center",gap:8}}>
+            {Ic.history(T.textSecondary)} Test History ({sessions.filter(s=>s.status==="completed").length})
+          </button>
         </div>
 
         {/* Stats + Domains */}
-        <div style={{display:"grid",gridTemplateColumns:"260px 1fr",gap:16}}>
+        <div style={{display:"grid",gridTemplateColumns:"260px 1fr",gap:16,marginBottom:28}}>
           <div>
             <h2 style={{fontSize:13,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:14}}>Performance</h2>
             <div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,overflow:"hidden"}}>
-              {[
-                {l:"Questions Seen",v:attempted+"/"+availQ.length,pct:availQ.length?Math.round(attempted/availQ.length*100):0,c:T.accent},
-                {l:"Accuracy",v:totalA?accuracy+"%":"—",pct:accuracy,c:accuracy>=70?T.correct:accuracy>=50?T.warning:T.incorrect},
-                {l:"Total Attempts",v:totalA,pct:null,c:null},
-                {l:"Needs Review",v:weakCount,pct:null,c:weakCount?T.incorrect:T.correct},
-              ].map((s,i)=>(
+              {[{l:"Seen",v:attempted+"/"+availQ.length,pct:availQ.length?Math.round(attempted/availQ.length*100):0,c:T.accent},{l:"Accuracy",v:totalA?accuracy+"%":"—",pct:accuracy,c:accuracy>=70?T.correct:accuracy>=50?T.warning:T.incorrect},{l:"Attempts",v:totalA,pct:null},{l:"Needs Review",v:weakCount,pct:null,c:weakCount?T.incorrect:T.correct}].map((s,i)=>(
                 <div key={s.l} style={{padding:"14px 16px",borderBottom:i<3?"1px solid "+T.borderLight:"none"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:s.pct!==null?6:0}}>
-                    <span style={{fontSize:12,color:T.textMuted,fontWeight:500}}>{s.l}</span>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:s.pct!=null?6:0}}>
+                    <span style={{fontSize:12,color:T.textMuted}}>{s.l}</span>
                     <span style={{fontSize:14,fontWeight:700,fontFamily:T.mono,color:s.c||T.textPrimary}}>{s.v}</span>
                   </div>
-                  {s.pct!==null&&<div style={{height:3,background:T.borderLight,borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,s.pct)+"%",background:s.c||T.accent,borderRadius:2,transition:"width .5s"}}/></div>}
+                  {s.pct!=null&&<div style={{height:3,background:T.borderLight,borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,s.pct)+"%",background:s.c||T.accent,borderRadius:2}}/></div>}
                 </div>
               ))}
             </div>
           </div>
           <div>
-            <h2 style={{fontSize:13,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:14}}>Exam Domains</h2>
+            <h2 style={{fontSize:13,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:14}}>Domains</h2>
             {domains.length?<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,overflow:"hidden"}}>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 70px 70px 70px 80px",padding:"10px 16px",background:T.surfaceRaised,borderBottom:"1px solid "+T.border,fontSize:11,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".04em"}}>
-                <span>Domain</span><span style={{textAlign:"center"}}>Weight</span><span style={{textAlign:"center"}}>Qs</span><span style={{textAlign:"center"}}>Seen</span><span style={{textAlign:"center"}}>Accuracy</span>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px",padding:"10px 16px",background:T.surfaceRaised,borderBottom:"1px solid "+T.border,fontSize:11,fontWeight:700,color:T.textMuted,textTransform:"uppercase"}}>
+                <span>Domain</span><span style={{textAlign:"center"}}>Wt</span><span style={{textAlign:"center"}}>Qs</span><span style={{textAlign:"center"}}>Acc</span>
               </div>
-              {domainStats.map((d,i)=>(
-                <div key={d.id} style={{display:"grid",gridTemplateColumns:"1fr 70px 70px 70px 80px",padding:"11px 16px",borderBottom:i<domainStats.length-1?"1px solid "+T.borderLight:"none",alignItems:"center",fontSize:13}}>
+              {domains.map((d,i)=>{const dqs=questions.filter(q=>q.domain_id===d.id);const dp=progress.filter(p=>dqs.some(q=>q.id===p.question_id));const dc=dp.filter(p=>p.is_correct).length;const da=dp.length?Math.round(dc/dp.length*100):null;return(
+                <div key={d.id} style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px",padding:"11px 16px",borderBottom:i<domains.length-1?"1px solid "+T.borderLight:"none",fontSize:13}}>
                   <span style={{fontWeight:500}}>{d.name}</span>
                   <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textSecondary}}>{d.weight_percent}%</span>
-                  <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textSecondary}}>{d.qc}</span>
-                  <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textSecondary}}>{d.att}</span>
-                  <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,fontWeight:600,color:d.acc===null?T.textMuted:d.acc>=70?T.correct:d.acc>=50?T.warning:T.incorrect}}>{d.acc!==null?d.acc+"%":"—"}</span>
-                </div>
-              ))}
-            </div>:<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,padding:32,textAlign:"center",color:T.textMuted,fontSize:13}}>No domains loaded</div>}
+                  <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textSecondary}}>{dqs.length}</span>
+                  <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,fontWeight:600,color:da==null?T.textMuted:da>=70?T.correct:da>=50?T.warning:T.incorrect}}>{da!=null?da+"%":"—"}</span>
+                </div>);})}
+            </div>:<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,padding:32,textAlign:"center",color:T.textMuted}}>No domains</div>}
           </div>
         </div>
+
+        {/* Recent completed tests */}
+        {recent.length>0&&<div>
+          <h2 style={{fontSize:13,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",marginBottom:14}}>Recent Tests</h2>
+          <div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,overflow:"hidden"}}>
+            {recent.map((s,i)=>(
+              <div key={s.id} style={{padding:"12px 20px",borderBottom:i<recent.length-1?"1px solid "+T.borderLight:"none",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{display:"flex",alignItems:"center",gap:16}}>
+                  <span style={{fontWeight:600,fontSize:13}}>{s.mode==="tutor"?"Tutor":s.mode==="timed"?"Timed":"Adaptive"}</span>
+                  <span style={{fontFamily:T.mono,fontSize:13,fontWeight:700,color:s.score_percent>=70?T.correct:s.score_percent>=50?T.warning:T.incorrect}}>{s.score_percent!=null?Math.round(s.score_percent)+"%":"—"}</span>
+                  <span style={{fontSize:12,color:T.textMuted}}>{s.correct_count}/{s.total_questions} · {relTime(s.completed_at||s.updated_at)}</span>
+                </div>
+                <button onClick={()=>onQuiz({sessionId:s.id,mode:"review",questionIds:s.question_ids,isReview:true})} style={{padding:"5px 12px",background:T.surfaceRaised,border:"1px solid "+T.border,borderRadius:T.r,fontSize:12,fontWeight:500,color:T.textSecondary}}>Review</button>
+              </div>
+            ))}
+          </div>
+          {sessions.filter(s=>s.status==="completed").length>5&&<div style={{textAlign:"center",marginTop:12}}><button onClick={()=>onNav("history")} style={{background:"none",color:T.accent,fontWeight:600,fontSize:13}}>View all →</button></div>}
+        </div>}
       </div>
     </div>
   );
 }
 
-// === QUIZ ===
+// === CREATE TEST ===
+function CreateTest({availQ,domains,progress,sessions,onStart,onBack,showToast}){
+  const[mode,setMode]=useState("tutor");
+  const[selDomains,setSelDomains]=useState(new Set());
+  const[filter,setFilter]=useState("all");
+  const[qCount,setQCount]=useState(40);
+
+  const answeredIds=new Set(progress.map(p=>p.question_id));
+  const latestByQ={};progress.forEach(p=>{const x=latestByQ[p.question_id];if(!x||new Date(p.created_at||0)>new Date(x.created_at||0))latestByQ[p.question_id]=p;});
+  const incorrectIds=new Set(Object.entries(latestByQ).filter(([_,p])=>!p.is_correct).map(([id])=>id));
+  // Flagged = union of flagged_indices across sessions mapped back to question_ids
+  const flaggedIds=new Set();
+  sessions.forEach(s=>{if(s.flagged_indices?.length&&s.question_ids?.length)s.flagged_indices.forEach(i=>{if(s.question_ids[i])flaggedIds.add(s.question_ids[i]);});});
+
+  const filtered=useMemo(()=>{
+    let qs=availQ;
+    if(selDomains.size>0)qs=qs.filter(q=>selDomains.has(q.domain_id));
+    if(filter==="unused")qs=qs.filter(q=>!answeredIds.has(q.id));
+    else if(filter==="incorrect")qs=qs.filter(q=>incorrectIds.has(q.id));
+    else if(filter==="flagged")qs=qs.filter(q=>flaggedIds.has(q.id));
+    return qs;
+  },[availQ,selDomains,filter]);
+
+  const toggleDomain=id=>{setSelDomains(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});};
+
+  const go=async()=>{
+    if(!filtered.length){showToast("No questions match your filters","err");return;}
+    const ordered=mode==="adaptive"?adaptiveQueue(filtered,progress):shuffle(filtered);
+    const subset=ordered.slice(0,Math.min(qCount,ordered.length));
+    const uid=sb.getUser()?.id;
+    try{
+      const sess=await sb.createSession({
+        user_id:uid,certification_id:CONFIG.CERT,mode,
+        domain_ids:selDomains.size?[...selDomains]:[],
+        filter_type:filter,
+        question_ids:subset.map(q=>q.id),
+        total_questions:subset.length,
+        time_limit_seconds:mode==="timed"?subset.length*CONFIG.SEC_PER_Q:null,
+        status:"in_progress",
+      });
+      onStart({sessionId:sess.id,mode,questions:subset,questionIds:subset.map(q=>q.id),resumeIndex:0,flaggedIndices:[],isResume:false});
+    }catch(e){console.error(e);showToast("Failed to create test","err");}
+  };
+
+  const selStyle=(active)=>({padding:"8px 16px",borderRadius:T.r,fontSize:13,fontWeight:600,background:active?T.accent:"transparent",color:active?"#fff":T.textSecondary,border:"1px solid "+(active?T.accent:T.border),transition:"all .12s"});
+
+  return(
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <div style={{background:T.chrome,borderBottom:"1px solid "+T.chromeBorder}}>
+        <div style={{maxWidth:800,margin:"0 auto",display:"flex",alignItems:"center",height:48,gap:12,padding:"0 24px"}}>
+          <button onClick={onBack} style={{background:"none",color:T.chromeText,fontSize:13,display:"flex",alignItems:"center",gap:4}}>{Ic.arrL(T.chromeText)} Back</button>
+          <div style={{width:1,height:20,background:T.chromeBorder}}/>
+          <span style={{fontWeight:700,fontSize:15,color:T.chromeTextBright}}>Create Test</span>
+        </div>
+      </div>
+      <div style={{maxWidth:800,margin:"0 auto",padding:"32px 24px"}}>
+        {/* Mode */}
+        <div style={{marginBottom:28}}>
+          <label style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",display:"block",marginBottom:10}}>Study Mode</label>
+          <div style={{display:"flex",gap:8}}>
+            {[{v:"tutor",l:"Tutor"},{v:"timed",l:"Timed Exam"},{v:"adaptive",l:"Adaptive"}].map(m=>(
+              <button key={m.v} onClick={()=>setMode(m.v)} style={selStyle(mode===m.v)}>{m.l}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Domains */}
+        <div style={{marginBottom:28}}>
+          <label style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",display:"block",marginBottom:10}}>Domains <span style={{fontWeight:400,textTransform:"none"}}>(select none for all)</span></label>
+          <div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,overflow:"hidden"}}>
+            {domains.map((d,i)=>{const dqc=availQ.filter(q=>q.domain_id===d.id).length;const on=selDomains.has(d.id);return(
+              <label key={d.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 16px",borderBottom:i<domains.length-1?"1px solid "+T.borderLight:"none",cursor:"pointer",background:on?T.accentBg:"transparent",transition:"background .1s"}}>
+                <input type="checkbox" className="chk" checked={on} onChange={()=>toggleDomain(d.id)}/>
+                <span style={{flex:1,fontSize:13,fontWeight:on?600:400}}>{d.name}</span>
+                <span style={{fontSize:12,color:T.textMuted,fontFamily:T.mono}}>{dqc}</span>
+              </label>
+            );})}
+          </div>
+        </div>
+
+        {/* Filter */}
+        <div style={{marginBottom:28}}>
+          <label style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",display:"block",marginBottom:10}}>Question Filter</label>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {[{v:"all",l:"All Questions",c:filtered.length},{v:"unused",l:"Unused",c:availQ.filter(q=>!answeredIds.has(q.id)&&(selDomains.size===0||selDomains.has(q.domain_id))).length},{v:"incorrect",l:"Answered Incorrectly",c:availQ.filter(q=>incorrectIds.has(q.id)&&(selDomains.size===0||selDomains.has(q.domain_id))).length},{v:"flagged",l:"Flagged",c:availQ.filter(q=>flaggedIds.has(q.id)&&(selDomains.size===0||selDomains.has(q.domain_id))).length}].map(f=>(
+              <button key={f.v} onClick={()=>setFilter(f.v)} style={{...selStyle(filter===f.v),display:"flex",alignItems:"center",gap:6}}>
+                {f.l} <span style={{fontFamily:T.mono,fontSize:11,opacity:.7}}>({f.c})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Question count */}
+        <div style={{marginBottom:32}}>
+          <label style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".06em",display:"block",marginBottom:10}}>Number of Questions</label>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <input type="range" min={5} max={Math.min(150,filtered.length||5)} step={5} value={Math.min(qCount,filtered.length||5)} onChange={e=>setQCount(+e.target.value)} style={{flex:1,accentColor:T.accent}}/>
+            <span style={{fontFamily:T.mono,fontSize:16,fontWeight:700,minWidth:40,textAlign:"right"}}>{Math.min(qCount,filtered.length)}</span>
+          </div>
+          <div style={{fontSize:12,color:T.textMuted,marginTop:4}}>{filtered.length} questions match your filters{mode==="timed"&&" · "+fmt(Math.min(qCount,filtered.length)*CONFIG.SEC_PER_Q)+" time limit"}</div>
+        </div>
+
+        {/* Start */}
+        <button onClick={go} disabled={!filtered.length} style={{width:"100%",padding:14,background:T.accent,color:"#fff",borderRadius:T.r,fontSize:15,fontWeight:700}}>
+          Start Test ({Math.min(qCount,filtered.length)} questions)
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// === HISTORY ===
+function History({sessions,questions,domains,progress,onReview,onBack}){
+  const completed=sessions.filter(s=>s.status==="completed");
+  return(
+    <div style={{minHeight:"100vh",background:T.bg}}>
+      <div style={{background:T.chrome,borderBottom:"1px solid "+T.chromeBorder}}>
+        <div style={{maxWidth:900,margin:"0 auto",display:"flex",alignItems:"center",height:48,gap:12,padding:"0 24px"}}>
+          <button onClick={onBack} style={{background:"none",color:T.chromeText,fontSize:13,display:"flex",alignItems:"center",gap:4}}>{Ic.arrL(T.chromeText)} Back</button>
+          <div style={{width:1,height:20,background:T.chromeBorder}}/>
+          <span style={{fontWeight:700,fontSize:15,color:T.chromeTextBright}}>Test History</span>
+          <span style={{fontSize:13,color:T.chromeText,marginLeft:8}}>{completed.length} tests</span>
+        </div>
+      </div>
+      <div style={{maxWidth:900,margin:"0 auto",padding:"28px 24px"}}>
+        {!completed.length&&<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,padding:48,textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>📋</div><div style={{fontWeight:600}}>No completed tests yet</div><div style={{fontSize:13,color:T.textMuted,marginTop:4}}>Create a test to get started.</div></div>}
+        {completed.length>0&&<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:T.rLg,overflow:"hidden"}}>
+          <div style={{display:"grid",gridTemplateColumns:"100px 80px 100px 120px 1fr 80px",padding:"10px 20px",background:T.surfaceRaised,borderBottom:"1px solid "+T.border,fontSize:11,fontWeight:700,color:T.textMuted,textTransform:"uppercase"}}>
+            <span>Mode</span><span style={{textAlign:"center"}}>Score</span><span style={{textAlign:"center"}}>Result</span><span style={{textAlign:"center"}}>Time</span><span>Date</span><span></span>
+          </div>
+          {completed.map((s,i)=>(
+            <div key={s.id} style={{display:"grid",gridTemplateColumns:"100px 80px 100px 120px 1fr 80px",padding:"12px 20px",borderBottom:i<completed.length-1?"1px solid "+T.borderLight:"none",alignItems:"center",fontSize:13}}>
+              <span style={{fontWeight:600}}>{s.mode==="tutor"?"Tutor":s.mode==="timed"?"Timed":"Adaptive"}</span>
+              <span style={{textAlign:"center",fontFamily:T.mono,fontWeight:700,color:s.score_percent>=70?T.correct:s.score_percent>=50?T.warning:T.incorrect}}>{s.score_percent!=null?Math.round(s.score_percent)+"%":"—"}</span>
+              <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textSecondary}}>{s.correct_count}/{s.total_questions}</span>
+              <span style={{textAlign:"center",fontFamily:T.mono,fontSize:12,color:T.textMuted}}>{s.elapsed_seconds?fmt(s.elapsed_seconds):"—"}</span>
+              <span style={{fontSize:12,color:T.textMuted}}>{new Date(s.completed_at||s.updated_at).toLocaleDateString()} {new Date(s.completed_at||s.updated_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>
+              <button onClick={()=>onReview({sessionId:s.id,mode:"review",questionIds:s.question_ids,isReview:true})} style={{padding:"5px 12px",background:T.surfaceRaised,border:"1px solid "+T.border,borderRadius:T.r,fontSize:12,fontWeight:500,color:T.textSecondary}}>Review</button>
+            </div>
+          ))}
+        </div>}
+      </div>
+    </div>
+  );
+}
+
+// === QUIZ ENGINE ===
 function Quiz({config,onExit,showToast}){
-  const qs=config.questions;
-  const[ci,setCi]=useState(0);
+  const[allQs,setAllQs]=useState(config.questions||[]);
+  const[ci,setCi]=useState(config.resumeIndex||0);
   const[sel,setSel]=useState(null);
   const[done,setDone]=useState(false);
   const[answers,setAnswers]=useState({});
   const[elapsed,setElapsed]=useState(0);
-  const[timeLeft,setTimeLeft]=useState(config.mode==="timed"?qs.length*CONFIG.SEC_PER_Q:null);
+  const[timeLeft,setTimeLeft]=useState(config.mode==="timed"?(config.questionIds||[]).length*CONFIG.SEC_PER_Q:null);
   const[autoEnd,setAutoEnd]=useState(false);
-  const[flagged,setFlagged]=useState(new Set());
+  const[flagged,setFlagged]=useState(new Set(config.flaggedIndices||[]));
   const[struck,setStruck]=useState({});
   const[showNav,setShowNav]=useState(false);
   const[saveQ,setSaveQ]=useState([]);
+  const[loaded,setLoaded]=useState(!!config.questions);
   const tRef=useRef(null);
-  const q=qs[ci];
+  const isReview=config.isReview;
 
-  useEffect(()=>{tRef.current=setInterval(()=>{setElapsed(e=>e+1);if(config.mode==="timed")setTimeLeft(t=>{if(t!==null&&t<=1){clearInterval(tRef.current);setAutoEnd(true);return 0;}return t!==null?t-1:null;});},1000);return()=>clearInterval(tRef.current);},[]);
-  useEffect(()=>{if(autoEnd){const c=Object.values(answers).filter(a=>a.correct).length,t=Object.keys(answers).length;showToast("Time's up — "+c+"/"+t+" ("+(!t?0:Math.round(c/t*100))+"%)");setTimeout(onExit,1500);}},[autoEnd]);
-  useEffect(()=>{const a=answers[q?.id];if(a){setSel(a.selected);setDone(true);}else{setSel(null);setDone(false);}},[ci]);
+  // Load questions by IDs if we only have IDs (resume/review)
+  useEffect(()=>{
+    if(config.questions)return;
+    (async()=>{
+      try{
+        const ids=config.questionIds||[];
+        if(!ids.length){onExit();return;}
+        const allQ=await sb.getQuestions(CONFIG.CERT);
+        const qMap=Object.fromEntries(allQ.map(q=>[q.id,q]));
+        const ordered=ids.map(id=>qMap[id]).filter(Boolean);
+        setAllQs(ordered);
+        // If reviewing, load all progress for this session
+        if(isReview){
+          const prog=await sb.getProgress(CONFIG.CERT);
+          const sessionProg=prog.filter(p=>ids.includes(p.question_id));
+          const ans={};
+          sessionProg.forEach(p=>{
+            if(!ans[p.question_id]||new Date(p.created_at||0)>new Date(ans[p.question_id].created_at||0))
+              ans[p.question_id]={selected:p.selected_answer,correct:p.is_correct,created_at:p.created_at};
+          });
+          setAnswers(ans);
+        }
+        setLoaded(true);
+      }catch(e){console.error(e);onExit();}
+    })();
+  },[]);
+
+  const q=allQs[ci];
+
+  // Timer (not for review)
+  useEffect(()=>{
+    if(isReview)return;
+    tRef.current=setInterval(()=>{setElapsed(e=>e+1);if(config.mode==="timed")setTimeLeft(t=>{if(t!=null&&t<=1){clearInterval(tRef.current);setAutoEnd(true);return 0;}return t!=null?t-1:null;});},1000);
+    return()=>clearInterval(tRef.current);
+  },[]);
+
+  useEffect(()=>{if(autoEnd)endBlock(true);},[autoEnd]);
+
+  useEffect(()=>{
+    if(!q)return;
+    const a=answers[q.id];
+    if(a){setSel(a.selected);setDone(true);}
+    else if(isReview){setSel(null);setDone(true);}
+    else{setSel(null);setDone(false);}
+  },[ci,loaded]);
+
   useEffect(()=>{if(!saveQ.length)return;const t=setTimeout(async()=>{const f=[];for(const p of saveQ)try{await sb.saveProgress(p);}catch{f.push(p);}setSaveQ(f);},5000);return()=>clearTimeout(t);},[saveQ]);
 
-  const choices=[q?.choice_a&&{id:"A",text:q.choice_a},q?.choice_b&&{id:"B",text:q.choice_b},q?.choice_c&&{id:"C",text:q.choice_c},q?.choice_d&&{id:"D",text:q.choice_d}].filter(Boolean);
-  const submit=()=>{if(!sel||!q)return;const ok=sel===q.correct_answer;setAnswers(a=>({...a,[q.id]:{selected:sel,correct:ok}}));setDone(true);const pd={user_id:sb.getUser()?.id,question_id:q.id,certification_id:CONFIG.CERT,is_used:true,is_correct:ok,selected_answer:sel,time_spent_seconds:elapsed,mode:config.mode};sb.saveProgress(pd).catch(()=>setSaveQ(p=>[...p,pd]));};
-  const toggleFlag=()=>{setFlagged(f=>{const n=new Set(f);n.has(ci)?n.delete(ci):n.add(ci);return n;});};
-  const toggleStrike=cid=>{if(done)return;setStruck(s=>{const x=new Set(s[q.id]||[]);x.has(cid)?x.delete(cid):x.add(cid);return{...s,[q.id]:x};});};
-  const end=()=>{const c=Object.values(answers).filter(a=>a.correct).length,t=Object.keys(answers).length;showToast(c+"/"+t+" correct ("+(t?Math.round(c/t*100):0)+"%)");onExit();};
+  const choices=q?[q.choice_a&&{id:"A",text:q.choice_a},q.choice_b&&{id:"B",text:q.choice_b},q.choice_c&&{id:"C",text:q.choice_c},q.choice_d&&{id:"D",text:q.choice_d}].filter(Boolean):[];
+
+  const submit=()=>{
+    if(!sel||!q||isReview)return;
+    const ok=sel===q.correct_answer;
+    setAnswers(a=>({...a,[q.id]:{selected:sel,correct:ok}}));
+    setDone(true);
+    const pd={user_id:sb.getUser()?.id,question_id:q.id,certification_id:CONFIG.CERT,is_used:true,is_correct:ok,selected_answer:sel,time_spent_seconds:elapsed,mode:config.mode,session_id:config.sessionId};
+    sb.saveProgress(pd).catch(()=>setSaveQ(p=>[...p,pd]));
+    // Update session progress
+    const newAnswers={...answers,[q.id]:{selected:sel,correct:ok}};
+    const answeredCount=Object.keys(newAnswers).length;
+    const correctCount=Object.values(newAnswers).filter(a=>a.correct).length;
+    sb.updateSession(config.sessionId,{answered_count:answeredCount,correct_count:correctCount,current_index:ci,elapsed_seconds:elapsed,flagged_indices:[...flagged]}).catch(()=>{});
+  };
+
+  const endBlock=(timedOut)=>{
+    if(isReview){onExit();return;}
+    clearInterval(tRef.current);
+    const c=Object.values(answers).filter(a=>a.correct).length;
+    const t=Object.keys(answers).length;
+    const pct=t?Math.round(c/t*100):0;
+    sb.updateSession(config.sessionId,{status:"completed",completed_at:new Date().toISOString(),answered_count:t,correct_count:c,score_percent:pct,elapsed_seconds:elapsed,flagged_indices:[...flagged]}).catch(()=>{});
+    showToast(timedOut?"Time's up — ":"")+(c+"/"+t+" ("+pct+"%)");
+    setTimeout(onExit,800);
+  };
+
+  const toggleFlag=()=>{if(isReview)return;setFlagged(f=>{const n=new Set(f);n.has(ci)?n.delete(ci):n.add(ci);return n;});};
+  const toggleStrike=cid=>{if(done)return;setStruck(s=>{const x=new Set(s[q?.id]||[]);x.has(cid)?x.delete(cid):x.add(cid);return{...s,[q.id]:x};});};
   const getExp=id=>q?.["explanation_"+id.toLowerCase()]||"";
+
+  if(!loaded)return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{width:32,height:32,border:"3px solid "+T.border,borderTopColor:T.accent,borderRadius:"50%",animation:"spin .7s linear infinite"}}/></div>;
   if(!q)return null;
-  const ans=answers[q.id],qStr=struck[q.id]||new Set();
-  const tUrg=timeLeft!==null&&timeLeft<60,tLow=timeLeft!==null&&timeLeft<300;
-  const showExpl=done&&(config.mode==="tutor"||config.mode==="adaptive");
+
+  const ans=answers[q.id];
+  const qStr=struck[q.id]||new Set();
+  const tUrg=timeLeft!=null&&timeLeft<60;
+  const tLow=timeLeft!=null&&timeLeft<300;
+  const showExpl=done&&(config.mode==="tutor"||config.mode==="adaptive"||isReview);
   const tbBtn=act=>({padding:"4px 10px",borderRadius:T.rSm,background:act?"rgba(255,255,255,.15)":"transparent",color:act?"#fff":T.chromeText,display:"flex",alignItems:"center",gap:5,fontSize:12,fontWeight:500});
 
   return(
@@ -343,21 +578,20 @@ function Quiz({config,onExit,showToast}){
       {/* Toolbar */}
       <div style={{height:44,background:T.chrome,display:"flex",alignItems:"center",padding:"0 16px",justifyContent:"space-between",flexShrink:0,borderBottom:"1px solid "+T.chromeBorder}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
-          <span style={{color:T.chromeTextBright,fontWeight:700,fontSize:13}}>🛡️ Block</span>
+          <span style={{color:T.chromeTextBright,fontWeight:700,fontSize:13}}>🛡️ {isReview?"Review":"Block"}</span>
           <div style={{width:1,height:20,background:T.chromeBorder}}/>
-          <span style={{fontSize:12,color:T.chromeText}}>{config.mode==="tutor"?"Tutor":config.mode==="timed"?"Timed Exam":"Adaptive"}</span>
+          <span style={{fontSize:12,color:T.chromeText}}>{isReview?"Review Mode":config.mode==="tutor"?"Tutor":config.mode==="timed"?"Timed Exam":"Adaptive"}</span>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:4}}>
-          <button onClick={toggleFlag} style={tbBtn(flagged.has(ci))}>{Ic.flag(flagged.has(ci)?"#FBBF24":T.chromeText,14)}<span>Flag</span></button>
+          {!isReview&&<><button onClick={toggleFlag} style={tbBtn(flagged.has(ci))}>{Ic.flag(flagged.has(ci)?"#FBBF24":T.chromeText,14)}<span>Flag</span></button><div style={{width:1,height:20,background:T.chromeBorder}}/></>}
+          <button onClick={()=>setShowNav(!showNav)} style={tbBtn(showNav)}>{Ic.grid(showNav?"#fff":T.chromeText,14)}<span>Nav</span></button>
           <div style={{width:1,height:20,background:T.chromeBorder}}/>
-          <button onClick={()=>setShowNav(!showNav)} style={tbBtn(showNav)}>{Ic.grid(showNav?"#fff":T.chromeText,14)}<span>Navigator</span></button>
+          {config.mode==="timed"&&!isReview?<div style={{fontFamily:T.mono,fontSize:13,fontWeight:600,color:tUrg?"#EF4444":tLow?"#FBBF24":T.chromeTextBright,animation:tUrg?"pulse 1s ease infinite":"none",padding:"0 8px",display:"flex",alignItems:"center",gap:5}}>{Ic.clock(tUrg?"#EF4444":T.chromeText,14)}{fmt(timeLeft||0)}</div>
+          :!isReview&&<span style={{fontFamily:T.mono,fontSize:12,color:T.chromeText,padding:"0 8px"}}>{fmt(elapsed)}</span>}
+          {!isReview&&<div style={{width:1,height:20,background:T.chromeBorder}}/>}
+          <span style={{fontFamily:T.mono,fontSize:13,fontWeight:600,color:T.chromeTextBright,padding:"0 6px"}}>{ci+1}/{allQs.length}</span>
           <div style={{width:1,height:20,background:T.chromeBorder}}/>
-          {config.mode==="timed"?<div style={{fontFamily:T.mono,fontSize:13,fontWeight:600,color:tUrg?"#EF4444":tLow?"#FBBF24":T.chromeTextBright,animation:tUrg?"pulse 1s ease infinite":"none",padding:"0 8px",display:"flex",alignItems:"center",gap:5}}>{Ic.clock(tUrg?"#EF4444":T.chromeText,14)}{fmt(timeLeft||0)}</div>
-          :<span style={{fontFamily:T.mono,fontSize:12,color:T.chromeText,padding:"0 8px"}}>{fmt(elapsed)}</span>}
-          <div style={{width:1,height:20,background:T.chromeBorder}}/>
-          <span style={{fontFamily:T.mono,fontSize:13,fontWeight:600,color:T.chromeTextBright,padding:"0 6px"}}>{ci+1}/{qs.length}</span>
-          <div style={{width:1,height:20,background:T.chromeBorder}}/>
-          <button onClick={end} style={{padding:"5px 12px",background:"#B91C1C",color:"#fff",borderRadius:T.r,fontSize:12,fontWeight:600,marginLeft:2}}>End Block</button>
+          <button onClick={()=>isReview?onExit():endBlock(false)} style={{padding:"5px 12px",background:isReview?T.textSecondary:"#B91C1C",color:"#fff",borderRadius:T.r,fontSize:12,fontWeight:600,marginLeft:2}}>{isReview?"Close":"End Block"}</button>
         </div>
       </div>
 
@@ -366,19 +600,19 @@ function Quiz({config,onExit,showToast}){
       <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
         {/* Navigator */}
         {showNav&&<div className="fi" style={{position:"absolute",top:0,right:0,width:260,height:"100%",background:T.surface,borderLeft:"1px solid "+T.border,zIndex:50,overflow:"auto",padding:16,boxShadow:"-4px 0 20px rgba(0,0,0,.06)"}}>
-          <div style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".04em",marginBottom:12}}>Navigator</div>
+          <div style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",marginBottom:12}}>Navigator</div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:4}}>
-            {qs.map((_,i)=>{
-              const answered=!!answers[qs[i]?.id],cur=i===ci,fl=flagged.has(i);
+            {allQs.map((_,i)=>{
+              const aQ=allQs[i];const answered=!!answers[aQ?.id];const cur=i===ci;const fl=flagged.has(i);
               let bg=T.surfaceRaised,bc=T.border,tc=T.textSecondary;
               if(cur){bg=T.accent;bc=T.accent;tc="#fff";}
-              else if(answered){const a=answers[qs[i]?.id];if(config.mode!=="timed"||done){bg=a.correct?T.correctBg:T.incorrectBg;bc=a.correct?T.correctBorder:T.incorrectBorder;tc=a.correct?T.correct:T.incorrect;}else{bg=T.accentBg;bc=T.accentBorder;tc=T.accent;}}
+              else if(answered){const a=answers[aQ?.id];bg=a.correct?T.correctBg:T.incorrectBg;bc=a.correct?T.correctBorder:T.incorrectBorder;tc=a.correct?T.correct:T.incorrect;}
               return <button key={i} onClick={()=>{setCi(i);setShowNav(false);}} style={{width:"100%",aspectRatio:"1",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:T.rSm,background:bg,border:"1px solid "+bc,color:tc,fontSize:11,fontWeight:600,position:"relative"}}>{i+1}{fl&&<div style={{position:"absolute",top:1,right:1,width:5,height:5,borderRadius:"50%",background:"#FBBF24"}}/>}</button>;
             })}
           </div>
         </div>}
 
-        {/* Question panel */}
+        {/* Question */}
         <div style={{flex:1,overflow:"auto",padding:"24px 28px",maxWidth:showExpl?"50%":"100%"}}>
           <div className="q-stem" style={{fontSize:15,lineHeight:1.85,marginBottom:24,whiteSpace:"pre-wrap"}}>{q.stem}</div>
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -388,15 +622,17 @@ function Quiz({config,onExit,showToast}){
               if(!done&&isSel){bg=T.accentBg;bc=T.accent;}
               if(done&&isOk){bg=T.correctBg;bc=T.correctBorder;}
               if(done&&isSel&&!isOk){bg=T.incorrectBg;bc=T.incorrectBorder;}
+              // In review mode with no answer recorded, just highlight correct
+              if(isReview&&!ans&&isOk){bg=T.correctBg;bc=T.correctBorder;}
               return(
                 <div key={c.id} className={isStr&&!done?"choice-struck":""} style={{display:"flex",alignItems:"flex-start"}}>
-                  <button onClick={()=>!done&&setSel(c.id)} style={{flex:1,display:"flex",alignItems:"flex-start",gap:12,padding:"12px 14px",border:"1.5px solid "+bc,borderRadius:T.r,background:bg,cursor:done?"default":"pointer",textAlign:"left",transition:"all .12s"}}>
+                  <button onClick={()=>!done&&!isReview&&setSel(c.id)} style={{flex:1,display:"flex",alignItems:"flex-start",gap:12,padding:"12px 14px",border:"1.5px solid "+bc,borderRadius:T.r,background:bg,cursor:done||isReview?"default":"pointer",textAlign:"left",transition:"all .12s"}}>
                     <div style={{width:24,height:24,borderRadius:"50%",flexShrink:0,border:"2px solid "+(done?(isOk?T.correct:isSel?T.incorrect:T.border):(isSel?T.accent:T.border)),background:done?(isOk?T.correct:isSel?T.incorrect:"transparent"):(isSel?T.accent:"transparent"),display:"flex",alignItems:"center",justifyContent:"center",color:(!done&&isSel)||(done&&(isOk||isSel))?"#fff":T.textMuted,fontSize:11,fontWeight:700,marginTop:1}}>
                       {done?(isOk?"✓":isSel?"✗":c.id):c.id}
                     </div>
                     <span className="choice-text" style={{fontSize:14,lineHeight:1.7}}>{c.text}</span>
                   </button>
-                  {!done&&<button onClick={()=>toggleStrike(c.id)} style={{padding:"12px 6px",background:"none",color:isStr?T.incorrect:T.textMuted,opacity:isStr?1:.3,transition:"opacity .15s"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=isStr?1:.3}>{Ic.strike(isStr?T.incorrect:T.textMuted,14)}</button>}
+                  {!done&&!isReview&&<button onClick={()=>toggleStrike(c.id)} style={{padding:"12px 6px",background:"none",color:isStr?T.incorrect:T.textMuted,opacity:isStr?1:.3}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=isStr?1:.3}>{Ic.strike(isStr?T.incorrect:T.textMuted,14)}</button>}
                 </div>
               );
             })}
@@ -405,22 +641,25 @@ function Quiz({config,onExit,showToast}){
 
         {/* Explanation */}
         {showExpl&&<div className="fi" style={{flex:1,overflow:"auto",padding:"24px 28px",background:T.surfaceRaised,borderLeft:"1px solid "+T.border}}>
-          <div style={{padding:"10px 14px",borderRadius:T.r,marginBottom:16,background:ans?.correct?T.correctBg:T.incorrectBg,border:"1px solid "+(ans?.correct?T.correctBorder:T.incorrectBorder)}}>
+          {ans&&<div style={{padding:"10px 14px",borderRadius:T.r,marginBottom:16,background:ans.correct?T.correctBg:T.incorrectBg,border:"1px solid "+(ans.correct?T.correctBorder:T.incorrectBorder)}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              {ans?.correct?Ic.check(T.correct,16):Ic.x(T.incorrect,16)}
-              <span style={{fontWeight:700,fontSize:14,color:ans?.correct?T.correct:T.incorrect}}>{ans?.correct?"Correct":"Incorrect — "+q.correct_answer+" is correct"}</span>
+              {ans.correct?Ic.check(T.correct,16):Ic.x(T.incorrect,16)}
+              <span style={{fontWeight:700,fontSize:14,color:ans.correct?T.correct:T.incorrect}}>{ans.correct?"Correct":"Incorrect — "+q.correct_answer}</span>
             </div>
-          </div>
+          </div>}
+          {!ans&&isReview&&<div style={{padding:"10px 14px",borderRadius:T.r,marginBottom:16,background:T.infoBg,border:"1px solid "+T.infoBorder}}>
+            <span style={{fontWeight:600,fontSize:13,color:T.infoText}}>Not answered — correct: {q.correct_answer}</span>
+          </div>}
           {q.educational_objective&&<div style={{padding:"12px 14px",background:T.infoBg,border:"1px solid "+T.infoBorder,borderRadius:T.r,marginBottom:16}}>
-            <div style={{fontSize:10,fontWeight:700,color:T.infoText,textTransform:"uppercase",letterSpacing:".05em",marginBottom:5}}>Educational Objective</div>
+            <div style={{fontSize:10,fontWeight:700,color:T.infoText,textTransform:"uppercase",marginBottom:5}}>Educational Objective</div>
             <div style={{fontSize:13,color:T.infoText,lineHeight:1.65}}>{q.educational_objective}</div>
           </div>}
           {q.rationale&&<div style={{marginBottom:20}}>
-            <h4 style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".04em",marginBottom:10}}>Explanation</h4>
+            <h4 style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",marginBottom:10}}>Explanation</h4>
             <div style={{fontSize:14,lineHeight:1.85,whiteSpace:"pre-wrap"}}>{q.rationale}</div>
           </div>}
           <div style={{marginBottom:20}}>
-            <h4 style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",letterSpacing:".04em",marginBottom:10}}>Answer Analysis</h4>
+            <h4 style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:"uppercase",marginBottom:10}}>Answer Analysis</h4>
             {choices.map(c=>{const isOk=c.id===q.correct_answer,exp=getExp(c.id);return(
               <div key={c.id} style={{padding:"10px 12px",marginBottom:4,borderRadius:T.r,border:"1px solid "+(isOk?T.correctBorder:T.borderLight),background:isOk?T.correctBg:T.surface}}>
                 <div style={{fontWeight:600,fontSize:13,color:isOk?T.correct:T.textSecondary}}><span style={{fontFamily:T.mono,fontSize:12}}>{c.id}.</span> {c.text}</div>
@@ -435,12 +674,12 @@ function Quiz({config,onExit,showToast}){
       <div style={{height:48,background:T.surfaceRaised,borderTop:"1px solid "+T.border,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",flexShrink:0}}>
         <button onClick={()=>ci>0&&setCi(ci-1)} disabled={ci===0} style={{padding:"7px 16px",background:T.surface,border:"1px solid "+T.border,borderRadius:T.r,fontWeight:500,color:ci===0?T.textMuted:T.textSecondary,display:"flex",alignItems:"center",gap:4}}>{Ic.arrL(ci===0?T.textMuted:T.textSecondary)} Previous</button>
         <div style={{display:"flex",gap:8}}>
-          {!done&&sel&&<button onClick={submit} style={{padding:"7px 24px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:700}}>Submit</button>}
-          {done&&<button onClick={ci<qs.length-1?()=>setCi(ci+1):end} style={{padding:"7px 24px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:700}}>{ci<qs.length-1?"Next →":"Finish"}</button>}
+          {!done&&!isReview&&sel&&<button onClick={submit} style={{padding:"7px 24px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:700}}>Submit</button>}
+          {(done||isReview)&&<button onClick={ci<allQs.length-1?()=>setCi(ci+1):()=>isReview?onExit():endBlock(false)} style={{padding:"7px 24px",background:T.accent,color:"#fff",borderRadius:T.r,fontWeight:700}}>{ci<allQs.length-1?"Next →":"Finish"}</button>}
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           {flagged.has(ci)&&<span style={{fontSize:11,color:"#D97706",fontWeight:600}}>Flagged</span>}
-          <span style={{fontFamily:T.mono,fontSize:12,color:T.textMuted}}>{ci+1} of {qs.length}</span>
+          <span style={{fontFamily:T.mono,fontSize:12,color:T.textMuted}}>{ci+1}/{allQs.length}</span>
         </div>
       </div>
     </div>
